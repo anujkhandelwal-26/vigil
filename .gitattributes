@@ -1,0 +1,10 @@
+# Normalise line endings to LF (WSL/Windows edits were converting files to CRLF,
+# which breaks bash scripts). Binaries are never touched.
+* text=auto eol=lf
+*.sh text eol=lf
+*.pdf binary
+*.png binary
+*.jpg binary
+*.gif binary
+*.pptx binary
+*.pkl binary
