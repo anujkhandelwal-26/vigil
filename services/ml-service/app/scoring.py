@@ -22,30 +22,81 @@ from app.features import build_feature_vector, FEATURE_TO_REASON_CODE
 _STATE: dict = {}
 
 
-def load_artifacts():
-    d = settings.model_dir
-    model = joblib.load(os.path.join(d, "model.pkl"))
-    iso = joblib.load(os.path.join(d, "isoforest.pkl"))
-    iso_cols = joblib.load(os.path.join(d, "isoforest_columns.pkl"))
-    with open(os.path.join(d, "metrics.json")) as f:
-        metrics = json.load(f)
+_ACTION_ORDER = ["APPROVE", "STEP_UP", "REVIEW", "DECLINE"]
 
+
+def _build_state(model, iso, iso_cols, version: str, metrics: dict) -> dict:
     raw_lgbm = model.calibrated_classifiers_[0].estimator
-    explainer = shap.TreeExplainer(raw_lgbm)
-
-    _STATE.update({
+    return {
         "model": model,
         "iso": iso,
         "iso_cols": iso_cols,
         "metrics": metrics,
-        "explainer": explainer,
-        "version": metrics.get("version", "v1.0.0"),
+        "explainer": shap.TreeExplainer(raw_lgbm),
+        "version": version,
         "thresholds": {
             "low": metrics["threshold_low"],
             "high": metrics["threshold_high"],
             "decline": metrics["threshold_decline"],
         },
-    })
+    }
+
+
+def _active_registry_row() -> dict | None:
+    """The model_registry row marked active, or None if there isn't one (or
+    the DB is unreachable at startup -- the base artifacts are then served)."""
+    try:
+        from app.db import get_conn
+        with get_conn() as conn:
+            cur = conn.execute(
+                "SELECT version, pr_auc, recall_at_1pct_fpr, fp_rate, threshold_low, "
+                "threshold_high, threshold_decline FROM model_registry WHERE active = true "
+                "ORDER BY trained_at DESC LIMIT 1"
+            )
+            row = cur.fetchone()
+            if row is None:
+                return None
+            cols = [d.name for d in cur.description]
+        return {k: (float(v) if k != "version" and v is not None else v) for k, v in zip(cols, row)}
+    except Exception as e:
+        print(f"[scoring] could not read model_registry, serving base artifacts: {e}")
+        return None
+
+
+def load_artifacts():
+    """Load the model the registry says is active, so a restart no longer
+    silently reverts to the base v1.0.0 artifacts after a promoted retrain.
+    Retrained versions live in artifacts/<version>/; the base model lives in
+    artifacts/ itself."""
+    d = settings.model_dir
+    with open(os.path.join(d, "metrics.json")) as f:
+        metrics = json.load(f)
+    version = metrics.get("version", "v1.0.0")
+
+    active = _active_registry_row()
+    if active and active["version"] != version:
+        vdir = os.path.join(d, active["version"])
+        if os.path.exists(os.path.join(vdir, "model.pkl")):
+            d = vdir
+            version = active["version"]
+            vmetrics = os.path.join(vdir, "metrics.json")
+            if os.path.exists(vmetrics):
+                with open(vmetrics) as f:
+                    metrics = json.load(f)
+            else:
+                # Older retrains didn't write metrics.json; the registry row
+                # carries the numbers that matter for serving.
+                metrics = {**active}
+        else:
+            print(f"[scoring] active registry version {active['version']} has no artifacts "
+                  f"at {vdir}; serving {version}")
+
+    model = joblib.load(os.path.join(d, "model.pkl"))
+    iso = joblib.load(os.path.join(d, "isoforest.pkl"))
+    iso_cols = joblib.load(os.path.join(d, "isoforest_columns.pkl"))
+
+    # One dict.update call: requests see the old bundle or the new, never a mix.
+    _STATE.update(_build_state(model, iso, iso_cols, version, metrics))
     return _STATE
 
 
@@ -55,28 +106,14 @@ def is_loaded() -> bool:
 
 def hot_swap(model, iso, iso_cols, version: str, metrics: dict) -> None:
     """Promote a newly retrained model into the live serving path. Called
-    only after the caller has already checked the new model's holdout
-    PR-AUC is >= the incumbent's -- the gate lives in main.py's
-    /internal/retrain, this function just performs the swap."""
-    raw_lgbm = model.calibrated_classifiers_[0].estimator
-    explainer = shap.TreeExplainer(raw_lgbm)
-    _STATE.update({
-        "model": model,
-        "iso": iso,
-        "iso_cols": iso_cols,
-        "metrics": metrics,
-        "explainer": explainer,
-        "version": version,
-        "thresholds": {
-            "low": metrics["threshold_low"],
-            "high": metrics["threshold_high"],
-            "decline": metrics["threshold_decline"],
-        },
-    })
+    only after the caller has checked the promotion gate AND committed the
+    registry row -- the gate lives in main.py's /internal/retrain, this
+    function just performs the swap."""
+    _STATE.update(_build_state(model, iso, iso_cols, version, metrics))
 
 
-def _action_for(score: float) -> str:
-    t = _STATE["thresholds"]
+def _action_for(score: float, thresholds: dict) -> str:
+    t = thresholds
     if score < t["low"]:
         return "APPROVE"
     if score < t["high"]:
@@ -86,9 +123,13 @@ def _action_for(score: float) -> str:
     return "DECLINE"
 
 
-def _anomaly_score(X: pd.DataFrame) -> float:
-    iso = _STATE["iso"]
-    cols = _STATE["iso_cols"]
+def _escalate(action: str, floor: str) -> str:
+    return action if _ACTION_ORDER.index(action) >= _ACTION_ORDER.index(floor) else floor
+
+
+def _anomaly_score(X: pd.DataFrame, state: dict) -> float:
+    iso = state["iso"]
+    cols = state["iso_cols"]
     row = X[cols]
     # decision_function: higher = more normal. Sigmoid-compress the negated
     # value into (0, 1), where 1 = highly anomalous. Scale factor chosen so
@@ -99,14 +140,24 @@ def _anomaly_score(X: pd.DataFrame) -> float:
 
 
 def score_application(app_dict: dict) -> dict:
+    # Snapshot once, so a concurrent hot_swap can't pair the new model's score
+    # with the old model's thresholds mid-request.
+    state = dict(_STATE)
     X = build_feature_vector(app_dict)
-    model = _STATE["model"]
+    model = state["model"]
 
     risk_score = float(model.predict_proba(X)[:, 1][0])
-    anomaly_score = _anomaly_score(X)
-    action = _action_for(risk_score)
+    anomaly_score = _anomaly_score(X, state)
+    action = _action_for(risk_score, state["thresholds"])
 
-    explainer = _STATE["explainer"]
+    # The novelty channel stays out of risk_score, but it can route a case to
+    # a human: a pattern the supervised model has never seen can score low
+    # risk while being highly anomalous.
+    novel = anomaly_score >= settings.anomaly_review_threshold
+    if novel:
+        action = _escalate(action, "REVIEW")
+
+    explainer = state["explainer"]
     shap_values = explainer.shap_values(X)
     if isinstance(shap_values, list):
         contrib = shap_values[1][0]  # class-1 (fraud) contributions
@@ -132,7 +183,7 @@ def score_application(app_dict: dict) -> dict:
             if code and code not in reason_codes:
                 reason_codes.append(code)
 
-    if action == "DECLINE" and not reason_codes:
+    if novel or (action == "DECLINE" and not reason_codes):
         reason_codes.append("NOVEL_PATTERN_UNSCORED")
 
     return {
@@ -141,5 +192,5 @@ def score_application(app_dict: dict) -> dict:
         "action": action,
         "reason_codes": reason_codes,
         "shap_top": shap_top,
-        "model_version": _STATE["version"],
+        "model_version": state["version"],
     }

@@ -11,6 +11,7 @@ continuously, we promote on merit," not automatically.
 """
 from __future__ import annotations
 
+import json
 import os
 import time
 
@@ -31,12 +32,27 @@ from app.training.train import (
 FEEDBACK_SAMPLE_WEIGHT = 5.0  # feedback rows are hard cases; weight them up
 
 
-def _next_version(current: str) -> str:
+def _next_version(current: str, taken: set[str]) -> str:
+    """Next minor version after `current` that isn't already in `taken`
+    (registry rows or artifact dirs) -- so a retrain after a restart can't
+    reuse, and overwrite, a version that already exists."""
     try:
-        major, minor, patch = current.lstrip("v").split(".")
-        return f"v{major}.{int(minor) + 1}.0"
-    except Exception:
+        major, minor, _ = current.lstrip("v").split(".")
+        minor = int(minor)
+        while True:
+            minor += 1
+            candidate = f"v{major}.{minor}.0"
+            if candidate not in taken:
+                return candidate
+    except ValueError:
         return f"v{int(time.time())}"
+
+
+def _taken_versions() -> set[str]:
+    taken = {d for d in os.listdir(ARTIFACT_DIR) if os.path.isdir(os.path.join(ARTIFACT_DIR, d))}
+    with get_conn() as conn:
+        taken |= {r[0] for r in conn.execute("SELECT version FROM model_registry").fetchall()}
+    return taken
 
 
 def _load_feedback_rows() -> pd.DataFrame:
@@ -126,14 +142,14 @@ def retrain(current_version: str) -> dict:
     importances = dict(zip(X_train.columns, [float(x) for x in model.feature_importances_]))
     importances = dict(sorted(importances.items(), key=lambda kv: -kv[1])[:15])
 
-    new_version = _next_version(current_version)
+    new_version = _next_version(current_version, _taken_versions())
     version_dir = os.path.join(ARTIFACT_DIR, new_version)
-    os.makedirs(version_dir, exist_ok=True)
+    os.makedirs(version_dir, exist_ok=False)
     joblib.dump(calibrated, os.path.join(version_dir, "model.pkl"))
     joblib.dump(iso, os.path.join(version_dir, "isoforest.pkl"))
     joblib.dump(behavioural_cols, os.path.join(version_dir, "isoforest_columns.pkl"))
 
-    return {
+    result = {
         "version": new_version,
         "algorithm": "LightGBM (isotonic-calibrated) + IsolationForest novelty channel",
         "training_rows": int(len(X_train)),
@@ -148,7 +164,10 @@ def retrain(current_version: str) -> dict:
         "fairness": fairness,
         "artifact_dir": version_dir,
         "train_seconds": round(time.time() - t0, 1),
-        "_model_obj": calibrated,
-        "_iso_obj": iso,
-        "_iso_cols": behavioural_cols,
     }
+    # Written alongside the pickles so scoring.load_artifacts() can restore
+    # this version's thresholds after a restart.
+    with open(os.path.join(version_dir, "metrics.json"), "w") as f:
+        json.dump(result, f, indent=2)
+
+    return {**result, "_model_obj": calibrated, "_iso_obj": iso, "_iso_cols": behavioural_cols}

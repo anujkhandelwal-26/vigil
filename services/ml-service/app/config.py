@@ -8,6 +8,9 @@ class Settings(BaseSettings):
     database_url: str = "postgresql://vigil:vigil@localhost:5433/vigil"
     ml_service_port: int = 8001
     model_dir: str = "./artifacts"
+    # Novelty-channel escalation: an anomaly score at or above this routes the
+    # case to at least REVIEW, even when the supervised risk score is low.
+    anomaly_review_threshold: float = 0.85
 
     llm_provider: str = "ollama"
     embedding_provider: str = "ollama"

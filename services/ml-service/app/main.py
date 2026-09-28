@@ -11,6 +11,7 @@ Endpoints:
 from __future__ import annotations
 
 import os
+import threading
 import time
 from contextlib import asynccontextmanager
 
@@ -19,7 +20,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 import json as _json
 from app import retrieval, rings, scoring
-from app.training import retrain as retrain_module
+from app.training import embed_policy, retrain as retrain_module
 from app.config import settings
 from app.copilot import context as ctx
 from app.copilot.guardrails import (
@@ -31,6 +32,8 @@ from app.embeddings import get_embedding_provider
 from app.features import build_feature_vector
 from app.llm.factory import get_llm_provider
 from app.schemas import ApplicationIn, CopilotRequest, CopilotResponse, ScoreOut
+
+_RETRAIN_LOCK = threading.Lock()
 
 PROMPTS_DIR = os.path.join(os.path.dirname(__file__), "prompts")
 
@@ -44,9 +47,21 @@ CASE_EXPLANATION_TEMPLATE = _load_prompt("case_explanation.v1.txt")
 COPILOT_TEMPLATE = _load_prompt("copilot_answer.v1.txt")
 
 
+def _embed_policy_corpus() -> None:
+    # Off the startup path: Ollama may still be warming up, and a failure here
+    # only degrades POLICY_LOOKUP, never scoring.
+    try:
+        n = embed_policy.embed_missing_policy_chunks()
+        if n:
+            print(f"[policy] embedded {n} policy chunk(s)")
+    except Exception as e:
+        print(f"[policy] could not embed policy corpus: {e}")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     scoring.load_artifacts()
+    threading.Thread(target=_embed_policy_corpus, daemon=True).start()
     yield
 
 
@@ -269,9 +284,18 @@ def copilot(req: CopilotRequest):
         print(f"[copilot] LLM call failed: {e}")
 
     grounded, violations = validate(raw, whitelisted, context_text) if raw else (False, ["llm_unavailable"])
-    answer = raw if grounded else (refusal_text() if not raw else deterministic_fallback(
-        app_row.get("label_typology") or "UNKNOWN", [], {},
-    ))
+    if grounded:
+        answer = raw
+    elif not raw:
+        answer = refusal_text()
+    else:
+        # Fall back to what the scoring engine actually decided -- never to
+        # label_typology, which is the generator's ground-truth answer key.
+        d = ctx._get_latest_decision(req.application_id)
+        answer = deterministic_fallback(
+            d["action"] if d else "UNKNOWN", (d["reason_codes"] if d else []) or [],
+            {c["code"]: c["title"] for c in catalogue},
+        )
     latency_ms = int((time.time() - t0) * 1000)
 
     with get_conn() as conn:
@@ -339,36 +363,44 @@ def retrain():
     """
     if not scoring.is_loaded():
         raise HTTPException(503, "no incumbent model loaded")
+    if not _RETRAIN_LOCK.acquire(blocking=False):
+        raise HTTPException(409, "a retrain is already running")
+    try:
+        incumbent_metrics = scoring._STATE["metrics"]
+        incumbent_pr_auc = incumbent_metrics.get("pr_auc", 0.0)
+        incumbent_version = scoring._STATE["version"]
 
-    incumbent_metrics = scoring._STATE["metrics"]
-    incumbent_pr_auc = incumbent_metrics.get("pr_auc", 0.0)
-    incumbent_version = scoring._STATE["version"]
-
-    result = retrain_module.retrain(current_version=incumbent_version)
-    promoted = result["pr_auc"] >= incumbent_pr_auc
-
-    if promoted:
-        scoring.hot_swap(result["_model_obj"], result["_iso_obj"], result["_iso_cols"],
-                          result["version"], {**result, "version": result["version"]})
-        promoted_reason = f"promoted: PR-AUC {result['pr_auc']:.4f} >= incumbent {incumbent_pr_auc:.4f}"
-    else:
-        promoted_reason = f"not promoted: PR-AUC {result['pr_auc']:.4f} < incumbent {incumbent_pr_auc:.4f}"
-
-    with get_conn() as conn:
+        result = retrain_module.retrain(current_version=incumbent_version)
+        promoted = result["pr_auc"] >= incumbent_pr_auc
         if promoted:
-            conn.execute("UPDATE model_registry SET active = false WHERE active = true")
-        conn.execute(
-            """INSERT INTO model_registry
-               (version, algorithm, trained_at, training_rows, feedback_rows_used,
-                pr_auc, recall_at_1pct_fpr, fp_rate, threshold_low, threshold_high,
-                threshold_decline, feature_importance, active, promoted_reason)
-               VALUES (%s, %s, now(), %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
-            (result["version"], result["algorithm"], result["training_rows"], result["feedback_rows_used"],
-             result["pr_auc"], result["recall_at_1pct_fpr"], result["fp_rate"],
-             result["threshold_low"], result["threshold_high"], result["threshold_decline"],
-             _json.dumps(result["feature_importance"]), promoted, promoted_reason),
-        )
-        conn.commit()
+            promoted_reason = f"promoted: PR-AUC {result['pr_auc']:.4f} >= incumbent {incumbent_pr_auc:.4f}"
+        else:
+            promoted_reason = f"not promoted: PR-AUC {result['pr_auc']:.4f} < incumbent {incumbent_pr_auc:.4f}"
+
+        # Registry first, swap second: if the INSERT fails, the live model is
+        # untouched and still matches the registry's active row.
+        with get_conn() as conn:
+            if promoted:
+                conn.execute("UPDATE model_registry SET active = false WHERE active = true")
+            conn.execute(
+                """INSERT INTO model_registry
+                   (version, algorithm, trained_at, training_rows, feedback_rows_used,
+                    pr_auc, recall_at_1pct_fpr, fp_rate, threshold_low, threshold_high,
+                    threshold_decline, feature_importance, active, promoted_reason)
+                   VALUES (%s, %s, now(), %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                (result["version"], result["algorithm"], result["training_rows"], result["feedback_rows_used"],
+                 result["pr_auc"], result["recall_at_1pct_fpr"], result["fp_rate"],
+                 result["threshold_low"], result["threshold_high"], result["threshold_decline"],
+                 _json.dumps(result["feature_importance"]), promoted, promoted_reason),
+            )
+            conn.commit()
+
+        if promoted:
+            metrics = {k: v for k, v in result.items() if not k.startswith("_")}
+            scoring.hot_swap(result["_model_obj"], result["_iso_obj"], result["_iso_cols"],
+                             result["version"], metrics)
+    finally:
+        _RETRAIN_LOCK.release()
 
     return {
         "version": result["version"],
