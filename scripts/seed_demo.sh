@@ -28,6 +28,9 @@ echo "==> generating synthetic data (fixed seed 20260921)"
 echo "==> training the model"
 (cd services/ml-service && .venv/bin/python -m app.training.train)
 
+echo "==> embedding the policy corpus (needs Ollama; retried at ml-service startup if this fails)"
+(cd services/ml-service && .venv/bin/python -m app.training.embed_policy) || echo "    skipped: embedding provider unavailable"
+
 echo "==> registering the trained model"
 python3 - <<'PYEOF'
 import json

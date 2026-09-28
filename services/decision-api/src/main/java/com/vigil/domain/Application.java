@@ -1,5 +1,6 @@
 package com.vigil.domain;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import jakarta.persistence.*;
 import lombok.Getter;
 import lombok.NoArgsConstructor;
@@ -41,7 +42,7 @@ public class Application {
     private OffsetDateTime submittedAt = OffsetDateTime.now();
 
     @Column(name = "age", nullable = false) private Integer age;
-    @Column(name = "gender", nullable = false) private String gender;
+    @JsonIgnore @Column(name = "gender", nullable = false) private String gender;
     @Column(name = "employment_type", nullable = false) private String employmentType;
     @Column(name = "monthly_income_inr", nullable = false) private BigDecimal monthlyIncomeInr;
     @Column(name = "city_tier", nullable = false) private Integer cityTier;
@@ -66,7 +67,7 @@ public class Application {
     @Column(name = "aadhaar_pan_linked", nullable = false) private Boolean aadhaarPanLinked;
     @Column(name = "name_dob_mismatch", nullable = false) private Boolean nameDobMismatch;
     @Column(name = "digilocker_docs_fetched", nullable = false) private Integer digilockerDocsFetched;
-    @Column(name = "aadhaar_last4") private String aadhaarLast4;
+    @JsonIgnore @Column(name = "aadhaar_last4") private String aadhaarLast4;
 
     @Column(name = "device_hash", nullable = false) private String deviceHash;
     @Column(name = "device_reuse_count_30d", nullable = false) private Integer deviceReuseCount30d;
@@ -99,8 +100,11 @@ public class Application {
     @Column(name = "recent_sim_swap_30d", nullable = false) private Boolean recentSimSwap30d;
     @Column(name = "mobile_name_match") private BigDecimal mobileNameMatch;
 
-    @Column(name = "label_fraud") private Boolean labelFraud;
-    @Column(name = "label_typology") private String labelTypology;
+    // Never serialised to API clients: the labels are the generator's answer
+    // key, and gender / Aadhaar digits are fairness-audit and PII fields the
+    // analyst UI doesn't need.
+    @JsonIgnore @Column(name = "label_fraud") private Boolean labelFraud;
+    @JsonIgnore @Column(name = "label_typology") private String labelTypology;
 
     @Column(name = "created_at", nullable = false)
     private OffsetDateTime createdAt = OffsetDateTime.now();
