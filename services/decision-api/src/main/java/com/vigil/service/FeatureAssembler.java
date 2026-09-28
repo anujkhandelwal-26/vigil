@@ -14,6 +14,12 @@ import java.time.OffsetDateTime;
  * max(client-supplied, server-computed) -- so a real ring building up
  * across several submissions in this running demo is genuinely detected,
  * not just replayed from a canned payload.
+ *
+ * Must run BEFORE the new application row is saved, so the counts see only
+ * prior applications. The generator's semantics are then matched exactly:
+ * device_reuse_count_30d counts OTHER applications on the device (0 = first
+ * use), while ip_distinct_apps_24h and account_shared_with_n_applicants
+ * include the applicant themselves (1 = only this applicant), hence the +1.
  */
 @Service
 public class FeatureAssembler {
@@ -33,7 +39,7 @@ public class FeatureAssembler {
         long acctShared = applicationRepository.countByBankAccountHashSince(req.bankAccountHash(), now.minusDays(90));
 
         int deviceReuseCount30d = (int) Math.max(req.deviceReuseCount30d(), deviceReuse);
-        int ipDistinctApps24h = (int) Math.max(req.ipDistinctApps24h(), ipApps);
+        int ipDistinctApps24h = (int) Math.max(req.ipDistinctApps24h(), ipApps + 1);
         int accountShared = (int) Math.max(req.accountSharedWithNApplicants(), acctShared + 1);
 
         return new Velocity(deviceReuseCount30d, ipDistinctApps24h, accountShared);

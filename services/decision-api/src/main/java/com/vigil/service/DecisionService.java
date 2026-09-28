@@ -27,6 +27,11 @@ public class DecisionService {
 
     private static final List<String> ACTION_ORDER = List.of("APPROVE", "STEP_UP", "REVIEW", "DECLINE");
 
+    // With the model down, the rules alone can't see synthetic-identity or
+    // novel patterns, so nothing is auto-approved: every degraded decision
+    // goes to a human at minimum.
+    static final String DEGRADED_FLOOR = "REVIEW";
+
     private final ApplicationRepository applicationRepository;
     private final DecisionRepository decisionRepository;
     private final FeatureAssembler featureAssembler;
@@ -51,10 +56,17 @@ public class DecisionService {
     public DecisionResponse submitAndScore(ApplicationSubmitRequest req, String actorUsername) {
         long t0 = System.currentTimeMillis();
 
+        // Velocity is counted before the insert, so this application isn't
+        // counted against itself.
+        FeatureAssembler.Velocity velocity = featureAssembler.assemble(req);
+
         Application app = mapToEntity(req);
+        // Persist what the rules and model actually saw, not the client's claim.
+        app.setDeviceReuseCount30d(velocity.deviceReuseCount30d());
+        app.setIpDistinctApps24h(velocity.ipDistinctApps24h());
+        app.setAccountSharedWithNApplicants(velocity.accountSharedWithNApplicants());
         app = applicationRepository.save(app);
 
-        FeatureAssembler.Velocity velocity = featureAssembler.assemble(req);
         RuleEngine.RuleResult ruleResult = ruleEngine.evaluate(req, velocity.deviceReuseCount30d(), velocity.ipDistinctApps24h(), velocity.accountSharedWithNApplicants());
 
         MlScoreRequest mlReq = MlScoreRequest.from(app.getId().toString(), req,
@@ -71,7 +83,7 @@ public class DecisionService {
         Set<String> combinedReasons = new LinkedHashSet<>(ruleResult.reasonCodes());
 
         if (outcome.degraded() || outcome.response() == null) {
-            finalAction = ruleResult.action();
+            finalAction = maxSeverity(ruleResult.action(), DEGRADED_FLOOR);
             riskScore = BigDecimal.ZERO;
             modelVersion = "rules-only";
             combinedReasons.add("ML_UNAVAILABLE_RULES_ONLY");
