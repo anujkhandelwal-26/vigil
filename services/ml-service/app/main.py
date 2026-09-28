@@ -24,7 +24,8 @@ from app.training import embed_policy, retrain as retrain_module
 from app.config import settings
 from app.copilot import context as ctx
 from app.copilot.guardrails import (
-    deterministic_fallback, refusal_text, sanitize_input, validate,
+    deterministic_fallback, policy_causality_violation, refusal_text, sanitize_input,
+    strip_leading_refusal, validate,
 )
 from app.copilot.router import classify_intent
 from app.db import get_conn
@@ -245,8 +246,11 @@ def copilot(req: CopilotRequest):
             q_emb = None
         context_text, cited_ids = ctx.similar_cases(req.application_id, q_emb)
     elif intent == "POLICY_LOOKUP":
-        q_emb = embed_provider.embed(question)
-        context_text, cited_ids = ctx.policy_lookup(req.application_id, q_emb)
+        try:
+            q_emb = embed_provider.embed(question)
+        except Exception:
+            q_emb = None
+        context_text, cited_ids = ctx.policy_lookup(req.application_id, q_emb, embed_provider.embed)
     else:
         context_text, cited_ids = "", []
 
@@ -283,9 +287,17 @@ def copilot(req: CopilotRequest):
         raw = ""
         print(f"[copilot] LLM call failed: {e}")
 
+    raw = strip_leading_refusal(raw) if raw else raw
     grounded, violations = validate(raw, whitelisted, context_text) if raw else (False, ["llm_unavailable"])
+    if raw and intent == "POLICY_LOOKUP" and policy_causality_violation(raw):
+        grounded, violations = False, violations + ["policy_credited_with_decision"]
     if grounded:
         answer = raw
+    elif intent == "POLICY_LOOKUP" and context_text:
+        # The retrieved passages are already readable, sourced text: show
+        # them verbatim rather than a decision recap that doesn't answer a
+        # policy question.
+        answer = context_text
     elif not raw:
         answer = refusal_text()
     else:
