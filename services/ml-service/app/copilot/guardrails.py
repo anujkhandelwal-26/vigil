@@ -110,5 +110,35 @@ def deterministic_fallback(action: str, reason_codes: list[str], reason_titles: 
     )
 
 
+_LEADING_REFUSAL = re.compile(
+    r"^\s*I don't have data on that in this case(?: file)?\.\s*(?:However,\s*)?", re.IGNORECASE)
+
+
+def strip_leading_refusal(text: str) -> str:
+    """Small local models sometimes open a substantive, grounded answer with
+    the refusal sentence and then answer anyway ("I don't have data on that
+    in this case file. However, ..."). Drop the contradictory opener; a bare
+    refusal is left untouched."""
+    rest = _LEADING_REFUSAL.sub("", text, count=1)
+    if rest == text or not rest.strip():
+        return text
+    return rest[0].upper() + rest[1:]
+
+
+_POLICY_CAUSALITY = re.compile(
+    r"\b(?:routed|scored|declined|approved|flagged|decided|sent)\b[^.]{0,60}?"
+    r"\b(?:based on|due to|because of|as per|in line with|under|owing to)\b[^.]{0,80}?"
+    r"\b(?:RBI|DPDP|Aadhaar|CIBIL|KYC|polic(?:y|ies)|regulation|direction|act)\b",
+    re.IGNORECASE,
+)
+
+
+def policy_causality_violation(text: str) -> bool:
+    """POLICY_LOOKUP answers must not claim a regulation caused the decision:
+    the scoring engine decided, the policy passages are only obligations
+    relevant to that decision."""
+    return bool(_POLICY_CAUSALITY.search(text))
+
+
 def refusal_text() -> str:
     return "I don't have data on that in this case file."

@@ -155,9 +155,84 @@ def similar_cases(application_id: str, embedding: list[float] | None) -> tuple[s
     return "Similar past cases by behavioural embedding: " + "; ".join(lines) + ".", [application_id] + [r["external_ref"] for r in rows]
 
 
-def policy_lookup(application_id: str, embedding: list[float]) -> tuple[str, list[str]]:
-    rows = retrieval.policy_lookup(embedding, k=3)
-    if not rows:
+# What a case's decision and reason codes make relevant, phrased as retrieval
+# queries against the policy corpus. Without these, "what policy applies to
+# this case?" retrieves only on the question's wording, so a vague question
+# gets generic passages the LLM (rightly) can't connect to the case.
+_ACTION_POLICY_TOPICS = {
+    "APPROVE": "Key Fact Statement before loan execution and the borrower's cooling-off period",
+    "STEP_UP": "Aadhaar offline XML e-KYC and video KYC identity verification",
+    "REVIEW": "customer due diligence proportionate to risk, enhanced due diligence for higher-risk customers",
+    "DECLINE": "suspicious transaction report to FIU-India for suspected fraud",
+}
+_REASON_POLICY_TOPICS = {
+    "AADHAAR_PAN_NOT_LINKED": "Aadhaar offline XML e-KYC identity verification",
+    "PAN_NAME_MISMATCH": "Aadhaar offline XML e-KYC identity verification",
+    "BUREAU_ENQUIRY_BURST": "burst of credit enquiries across multiple lenders",
+    "THIN_OR_NO_BUREAU_FILE": "new-to-credit consumer with no CIBIL score",
+    "BANK_ACCOUNT_SHARED": "suspicious transaction report to FIU-India for suspected fraud",
+    "DEVICE_REUSE_HIGH": "suspicious transaction report to FIU-India for suspected fraud",
+    "IP_MULTI_APPLICANT": "suspicious transaction report to FIU-India for suspected fraud",
+    "VELOCITY_MULTI_APP_24H": "suspicious transaction report to FIU-India for suspected fraud",
+    "EMULATOR_OR_ROOTED": "enhanced due diligence for higher-risk customers",
+    "NOVEL_PATTERN_UNSCORED": "enhanced due diligence for higher-risk customers",
+    "SIM_SWAP_RECENT": "video KYC identity verification with a live photograph",
+    "MOBILE_NAME_MISMATCH": "video KYC identity verification with a live photograph",
+}
+# Every case in this system is processed for fraud detection.
+_ALWAYS_POLICY_TOPIC = "processing personal data for prevention and detection of fraud as a legitimate use"
+_MAX_POLICY_PASSAGES = 5
+
+
+def _case_policy_topics(decision: dict | None, titles: dict[str, str]) -> list[tuple[str, str]]:
+    """(why-it-applies, retrieval query) pairs for this case, deduped by query."""
+    topics = []
+    if decision:
+        if decision["action"] in _ACTION_POLICY_TOPICS:
+            topics.append((f"to a {decision['action']} decision",
+                           _ACTION_POLICY_TOPICS[decision["action"]]))
+        for c in decision["reason_codes"] or []:
+            if c in _REASON_POLICY_TOPICS:
+                topics.append((f"to the signal {titles.get(c, c)} [{c}]", _REASON_POLICY_TOPICS[c]))
+    topics.append(("to every application screened for fraud", _ALWAYS_POLICY_TOPIC))
+    seen, unique = set(), []
+    for why, query in topics:
+        if query not in seen:
+            seen.add(query)
+            unique.append((why, query))
+    return unique[:3]  # bound the embed calls
+
+
+def policy_lookup(application_id: str, embedding: list[float] | None,
+                  embed=None) -> tuple[str, list[str]]:
+    """Passages matching this case's decision and reason codes (when `embed`
+    is given) plus passages matching the question. Each passage is labelled
+    with why it applies, so the LLM can tie the policy to the case instead of
+    judging a bare list of passages "unrelated" and refusing."""
+    d = _get_latest_decision(application_id)
+    labelled: list[tuple[str, dict]] = []
+    if embed is not None:
+        for why, query in _case_policy_topics(d, _reason_titles()):
+            try:
+                labelled += [(why, r) for r in retrieval.policy_lookup(embed(query), k=1)]
+            except Exception:
+                continue  # embedding hiccup: the question's passages still stand
+    if embedding is not None:
+        labelled += [("to the analyst's question", r) for r in retrieval.policy_lookup(embedding, k=2)]
+
+    seen, unique = set(), []
+    for why, r in labelled:
+        if r["content"] not in seen:
+            seen.add(r["content"])
+            unique.append((why, r))
+    unique = unique[:_MAX_POLICY_PASSAGES]
+    if not unique:
         return "No matching policy passages found.", []
-    lines = [f"[{r['source']}] {r['content']}" for r in rows]
-    return " ".join(lines), [r["source"] for r in rows]
+
+    # The decision came from the scoring engine; state that outright, or a
+    # small model reads "policy relevant to a REVIEW decision" as "routed to
+    # REVIEW because of this policy".
+    header = (f"This application was routed to {d['action']} by the scoring engine, not by policy. "
+              f"Policy obligations relevant to it: ") if d else ""
+    text = header + " ".join(f"Relevant {why}: [{r['source']}] {r['content']}" for why, r in unique)
+    return text, [r["source"] for _, r in unique]
