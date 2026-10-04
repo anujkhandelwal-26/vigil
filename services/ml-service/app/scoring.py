@@ -13,6 +13,7 @@ import math
 import os
 
 import joblib
+import numpy as np
 import pandas as pd
 import shap
 
@@ -139,6 +140,16 @@ def _anomaly_score(X: pd.DataFrame, state: dict) -> float:
     return 1.0 / (1.0 + math.exp(raw * 18.0))
 
 
+def _shap_value(val):
+    """Numbers as float, categorical levels as str, NaN/unseen as None --
+    float() on a categorical level ("SALARIED") raises ValueError."""
+    if val is None or pd.isna(val):
+        return None
+    if isinstance(val, (bool, int, float, np.number)):
+        return float(val)
+    return str(val)
+
+
 def score_application(app_dict: dict) -> dict:
     # Snapshot once, so a concurrent hot_swap can't pair the new model's score
     # with the old model's thresholds mid-request.
@@ -174,7 +185,7 @@ def score_application(app_dict: dict) -> dict:
         direction = "increases_risk" if c > 0 else "decreases_risk"
         shap_top.append({
             "feature": feat,
-            "value": float(val) if not pd.isna(val) else None,
+            "value": _shap_value(val),
             "contribution": float(c),
             "direction": direction,
         })

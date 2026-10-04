@@ -24,7 +24,7 @@ from app.training import embed_policy, retrain as retrain_module
 from app.config import settings
 from app.copilot import context as ctx
 from app.copilot.guardrails import (
-    deterministic_fallback, policy_causality_violation, refusal_text, sanitize_input,
+    deterministic_fallback, extract_reason_codes, policy_causality_violation, refusal_text, sanitize_input,
     strip_leading_refusal, validate,
 )
 from app.copilot.router import classify_intent
@@ -155,6 +155,9 @@ def narrative(application_id: str):
         cur = conn.execute(
             "SELECT narrative, grounded, provider, model, latency_ms, cited_reason_codes, guardrail_violations "
             "FROM llm_explanation WHERE application_id = %s AND template_version = 'case_explanation.v1' "
+            # Only grounded rows: a cached deterministic fallback (LLM was
+            # down) must not pin the fallback forever.
+            "AND grounded = true "
             "ORDER BY created_at DESC LIMIT 1",
             (application_id,),
         )
@@ -176,15 +179,17 @@ def narrative(application_id: str):
     prompt = CASE_EXPLANATION_TEMPLATE.format(
         reason_codes_catalogue=catalogue_text,
         action=d["action"] if d else "UNKNOWN",
-        risk_score=d["risk_score"] if d else "unknown",
+        risk_score=ctx.fmt_risk(d["risk_score"]) if d else "unknown",
         reason_codes=", ".join(d["reason_codes"]) if d and d["reason_codes"] else "none",
         shap_top=str(d["shap_top"]) if d else "none",
         similar_cases=similar_text,
     )
 
-    provider = get_llm_provider()
+    provider = None
     t0 = time.time()
     try:
+        # Inside the try: a missing SDK/credentials degrades to the fallback.
+        provider = get_llm_provider()
         # The prompt template is a fully self-contained "SYSTEM:"-prefixed
         # instruction block; layering a second, generic system message on
         # top of it made qwen2.5:3b default to the rule-3 refusal string
@@ -207,14 +212,15 @@ def narrative(application_id: str):
                (application_id, template_version, provider, model, narrative,
                 cited_reason_codes, grounded, guardrail_violations, latency_ms)
                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)""",
-            (application_id, "case_explanation.v1", provider.name, provider.model,
-             final_text, d["reason_codes"] if d else [], grounded, violations, latency_ms),
+            (application_id, "case_explanation.v1", provider.name if provider else "none",
+             provider.model if provider else "none", final_text, d["reason_codes"] if d else [], grounded, violations, latency_ms),
         )
         conn.commit()
 
     return {
-        "narrative": final_text, "grounded": grounded, "provider": provider.name,
-        "model": provider.model, "latency_ms": latency_ms, "cached": False,
+        "narrative": final_text, "grounded": grounded,
+        "provider": provider.name if provider else "none",
+        "model": provider.model if provider else "none", "latency_ms": latency_ms, "cached": False,
         "guardrail_violations": violations,
     }
 
@@ -277,9 +283,10 @@ def copilot(req: CopilotRequest):
         question=question,
     )
 
-    provider = get_llm_provider()
+    provider = None
     t0 = time.time()
     try:
+        provider = get_llm_provider()
         # See the narrative() comment above: no separate system prompt --
         # the template already carries its own SYSTEM: block.
         raw = provider.complete("", prompt, max_tokens=250)
@@ -309,6 +316,8 @@ def copilot(req: CopilotRequest):
             {c["code"]: c["title"] for c in catalogue},
         )
     latency_ms = int((time.time() - t0) * 1000)
+    # Reason codes the shown answer actually cites (whitelisted only).
+    cited_codes = [c for c in dict.fromkeys(extract_reason_codes(answer)) if c in whitelisted]
 
     with get_conn() as conn:
         conn.execute(
@@ -316,15 +325,15 @@ def copilot(req: CopilotRequest):
                (application_id, template_version, provider, model, narrative,
                 cited_reason_codes, grounded, guardrail_violations, latency_ms)
                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)""",
-            (req.application_id, "copilot_answer.v1", provider.name, provider.model,
-             answer, [], grounded, violations, latency_ms),
+            (req.application_id, "copilot_answer.v1", provider.name if provider else "none",
+             provider.model if provider else "none", answer, cited_codes, grounded, violations, latency_ms),
         )
         conn.commit()
 
     return CopilotResponse(
         answer=answer, intent=intent, grounded=grounded, cited_ids=cited_ids,
-        guardrail_violations=violations, provider=provider.name, model=provider.model,
-        latency_ms=latency_ms,
+        guardrail_violations=violations, provider=provider.name if provider else "none",
+        model=provider.model if provider else "none", latency_ms=latency_ms,
     )
 
 

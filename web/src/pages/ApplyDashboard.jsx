@@ -113,6 +113,27 @@ function FormField({ label, type, options, value, onChange, k }) {
   )
 }
 
+/** Turn an RTK Query error into {message, fieldErrors}; backend 400s are problem+json with fieldErrors. */
+function describeSubmitError(err) {
+  const detail = typeof err?.data?.detail === 'string' ? err.data.detail : null
+  if (err?.status === 409) {
+    return { message: 'That application reference has already been used. Change the reference and submit again.' }
+  }
+  if (err?.status === 400) {
+    const fe = err?.data?.fieldErrors
+    const fieldErrors = fe && typeof fe === 'object' && !Array.isArray(fe) ? Object.entries(fe) : []
+    return { message: detail || 'Submission failed — check the field values.', fieldErrors }
+  }
+  if (err?.status === 401) return { message: 'Your session has expired. Please sign in again.' }
+  if (typeof err?.status === 'number' && err.status >= 500) {
+    return { message: detail || 'The service is unavailable right now. Please try again in a moment.' }
+  }
+  if (err?.status === 'FETCH_ERROR' || err?.status === 'TIMEOUT_ERROR') {
+    return { message: 'Could not reach the service. Check your connection and try again.' }
+  }
+  return { message: detail || 'Submission failed — check the field values.' }
+}
+
 export default function ApplyDashboard() {
   const [scenarioKey, setScenarioKey] = useState('CLEAN')
   const [form, setForm] = useState(() => SCENARIOS.CLEAN.build())
@@ -142,7 +163,7 @@ export default function ApplyDashboard() {
       // dev mode to catch exactly this kind of bug.
       setResult({ ...res, _clientRoundTripMs: Math.round(performance.now() - t0) })
     } catch (err) {
-      setError(err?.data?.detail || 'Submission failed — check the field values.')
+      setError(describeSubmitError(err))
     }
   }
 
@@ -152,8 +173,11 @@ export default function ApplyDashboard() {
   } catch {
     shapTop = null
   }
+  if (!Array.isArray(shapTop)) shapTop = null
 
-  const noveltyGap = result?.anomalyScore != null && Number(result.anomalyScore) > 0.85 && Number(result.riskScore) < 0.15
+  // riskScore is null for rules-only (degraded) decisions: never treat that as 0.
+  const noveltyGap = result?.anomalyScore != null && result?.riskScore != null
+    && Number(result.anomalyScore) > 0.85 && Number(result.riskScore) < 0.15
 
   return (
     <div className="mx-auto max-w-3xl space-y-4 p-5">
@@ -213,7 +237,14 @@ export default function ApplyDashboard() {
 
       {error && (
         <div className="border border-[#e3c2b6] bg-[#fdf4f1] px-4 py-3 text-[13px] text-[#9c3211]">
-          {error}
+          <p>{error.message}</p>
+          {error.fieldErrors?.length > 0 && (
+            <ul className="mt-1.5 list-disc space-y-0.5 pl-4 text-[12px]">
+              {error.fieldErrors.map(([field, msg]) => (
+                <li key={field}><span className="hash">{field}</span>: {String(msg)}</li>
+              ))}
+            </ul>
+          )}
         </div>
       )}
 
@@ -224,8 +255,11 @@ export default function ApplyDashboard() {
               <div>
                 <p className="text-[12px] text-ink-muted">Risk score (supervised)</p>
                 <p className="tnum text-[28px] font-semibold leading-none">
-                  {Number(result.riskScore).toFixed(3)}
+                  {result.riskScore != null ? Number(result.riskScore).toFixed(3) : '—'}
                 </p>
+                {result.riskScore == null && (
+                  <p className="text-[11px] text-ink-faint">rules-only (ML unavailable)</p>
+                )}
               </div>
               <div>
                 <p className="text-[12px] text-ink-muted">Anomaly score (novelty)</p>

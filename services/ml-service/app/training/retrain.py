@@ -26,7 +26,7 @@ from sklearn.metrics import average_precision_score
 from app.db import get_conn
 from app.features import build_feature_frame, CATEGORICAL_FEATURES
 from app.training.train import (
-    ARTIFACT_DIR, DATA_PATH, recall_at_fpr, search_thresholds, fairness_report,
+    ARTIFACT_DIR, DATA_PATH, recall_at_fpr, search_thresholds, fairness_report, cost_metrics,
 )
 
 FEEDBACK_SAMPLE_WEIGHT = 5.0  # feedback rows are hard cases; weight them up
@@ -160,6 +160,7 @@ def retrain(current_version: str) -> dict:
         "threshold_high": t_high,
         "threshold_decline": t_decline,
         "fp_rate": float(((test_scores >= t_decline) & (y_test == 0)).sum() / max((y_test == 0).sum(), 1)),
+        **cost_metrics(y_test, test_scores, cost, t_low, t_high, t_decline),
         "feature_importance": importances,
         "fairness": fairness,
         "artifact_dir": version_dir,

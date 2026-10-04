@@ -220,9 +220,7 @@ the first time it's used, not at startup.
 ```bash
 cp .env.example .env   # fill in real values — see "Security" below
 docker compose up -d db
-docker exec -i vigil-db psql -U vigil -d vigil < db/V1__schema.sql
-docker exec -i vigil-db psql -U vigil -d vigil < db/V2__seed_reason_codes.sql
-docker exec -i vigil-db psql -U vigil -d vigil < db/V3__seed_policy_chunks.sql
+./scripts/migrate.sh   # applies db/V*.sql with the official Flyway image (creates flyway_schema_history)
 ```
 
 ### 2. Generate data and train the model
@@ -247,7 +245,7 @@ export SPRING_DATASOURCE_USERNAME=vigil
 export SPRING_DATASOURCE_PASSWORD=<from .env>
 export VIGIL_JWT_SECRET=<from .env>
 export VIGIL_DEMO_PASSWORD=<from .env>
-export VIGIL_FLYWAY_LOCATION="filesystem:$(pwd)/../../db"
+export VIGIL_FLYWAY_LOCATION="$(pwd)/../../db"
 mvn -o spring-boot:run   # or ./mvnw spring-boot:run with network access
 
 # web
@@ -259,8 +257,14 @@ Open **http://localhost:5174**. Demo accounts: `analyst` / `admin`, password is
 
 ### Full containerised stack (no local Java/Python/Node needed)
 ```bash
+# first: run ./scripts/seed_demo.sh (or train once) so services/ml-service/artifacts/ exists;
+# it is bind-mounted into the ml-service container, not baked into the image
 docker compose --profile full up --build
 ```
+The web container proxies `/api/` to decision-api. Retrained models are written to
+`services/ml-service/artifacts/` on the host; the container runs as a non-root `vigil` user, so if a
+retrain fails with a permission error make that directory writable by the container's uid
+(`chmod -R a+rwX services/ml-service/artifacts`).
 
 ---
 

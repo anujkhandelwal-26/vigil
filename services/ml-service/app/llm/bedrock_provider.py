@@ -23,10 +23,13 @@ class BedrockProvider(LlmProvider):
         return self._model
 
     def complete(self, system_prompt: str, user_prompt: str, max_tokens: int = 300) -> str:
+        kwargs = {}
+        if system_prompt:  # Converse rejects an empty system text block
+            kwargs["system"] = [{"text": system_prompt}]
         resp = self.client.converse(
             modelId=self._model,
-            system=[{"text": system_prompt}],
             messages=[{"role": "user", "content": [{"text": user_prompt}]}],
             inferenceConfig={"maxTokens": max_tokens, "temperature": 0.2},
+            **kwargs,
         )
         return resp["output"]["message"]["content"][0]["text"].strip()

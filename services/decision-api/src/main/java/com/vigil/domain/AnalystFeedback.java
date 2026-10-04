@@ -33,7 +33,7 @@ public class AnalystFeedback {
     @Column(name = "original_action", nullable = false)
     private String originalAction;
 
-    @Column(name = "original_score", nullable = false)
+    @Column(name = "original_score")
     private BigDecimal originalScore;
 
     @Column(name = "was_false_positive", nullable = false)

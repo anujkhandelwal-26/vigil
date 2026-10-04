@@ -115,6 +115,30 @@ def action_for(score, t_low, t_high, t_decline):
     return "DECLINE"
 
 
+COST_CURVE_KEYS = (
+    "expected_cost_inr", "cost_assumptions_inr",
+    "naive_binary_decline_rate", "naive_binary_fp_rate",
+    "four_way_decline_rate", "four_way_fp_rate",
+)
+
+
+def cost_metrics(y_true, scores, cost, t_low, t_high, t_decline):
+    """The metrics /internal/metrics/cost-curve reads. Shared by train.py and
+    retrain.py so a promoted retrain doesn't lose the false-positive-reduction
+    evidence."""
+    naive_decline_rate, naive_fp_rate = naive_binary_decline_rate(y_true, scores, 0.5)
+    actions = np.array([action_for(s, t_low, t_high, t_decline) for s in scores])
+    declined = actions == "DECLINE"
+    return {
+        "expected_cost_inr": float(cost),
+        "cost_assumptions_inr": {"C_FN": C_FN, "C_FP": C_FP, "C_STEPUP": C_STEPUP, "C_REVIEW": C_REVIEW},
+        "naive_binary_decline_rate": naive_decline_rate,
+        "naive_binary_fp_rate": naive_fp_rate,
+        "four_way_decline_rate": float(declined.mean()),
+        "four_way_fp_rate": float((declined & (y_true == 0)).sum() / max((y_true == 0).sum(), 1)),
+    }
+
+
 def fairness_report(df_raw, y_true, scores, t_low, t_high, t_decline):
     actions = np.array([action_for(s, t_low, t_high, t_decline) for s in scores])
     declined = actions == "DECLINE"
@@ -200,12 +224,9 @@ def main():
     cost, t_low, t_high, t_decline = search_thresholds(y_test, test_scores)
     print(f"optimal thresholds: low={t_low:.3f} high={t_high:.3f} decline={t_decline:.3f}  total_cost=₹{cost:,.0f}")
 
-    naive_decline_rate, naive_fp_rate = naive_binary_decline_rate(y_test, test_scores, 0.5)
-    actions = np.array([action_for(s, t_low, t_high, t_decline) for s in test_scores])
-    four_way_decline_rate = float((actions == "DECLINE").mean())
-    four_way_fp_rate = float(((actions == "DECLINE") & (y_test == 0)).sum() / max((y_test == 0).sum(), 1))
-    print(f"binary@0.5 decline_rate={naive_decline_rate:.4f} fp_rate={naive_fp_rate:.4f}")
-    print(f"four-way   decline_rate={four_way_decline_rate:.4f} fp_rate={four_way_fp_rate:.4f}")
+    cost_m = cost_metrics(y_test, test_scores, cost, t_low, t_high, t_decline)
+    print(f"binary@0.5 decline_rate={cost_m['naive_binary_decline_rate']:.4f} fp_rate={cost_m['naive_binary_fp_rate']:.4f}")
+    print(f"four-way   decline_rate={cost_m['four_way_decline_rate']:.4f} fp_rate={cost_m['four_way_fp_rate']:.4f}")
 
     iso_train = X_train[y_train == 0].copy()
     behavioural_cols = ["form_fill_seconds", "typing_speed_cpm", "paste_events",
@@ -238,12 +259,7 @@ def main():
         "threshold_low": t_low,
         "threshold_high": t_high,
         "threshold_decline": t_decline,
-        "expected_cost_inr": float(cost),
-        "cost_assumptions_inr": {"C_FN": C_FN, "C_FP": C_FP, "C_STEPUP": C_STEPUP, "C_REVIEW": C_REVIEW},
-        "naive_binary_decline_rate": naive_decline_rate,
-        "naive_binary_fp_rate": naive_fp_rate,
-        "four_way_decline_rate": four_way_decline_rate,
-        "four_way_fp_rate": four_way_fp_rate,
+        **cost_m,
         "feature_importance_top15": importances,
         "fairness": fairness,
         "train_seconds": round(time.time() - t0, 1),

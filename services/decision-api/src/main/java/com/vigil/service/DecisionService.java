@@ -82,13 +82,19 @@ public class DecisionService {
 
         Set<String> combinedReasons = new LinkedHashSet<>(ruleResult.reasonCodes());
 
-        if (outcome.degraded() || outcome.response() == null) {
+        // A 2xx is not trusted blindly: a response with no usable action or score
+        // is treated exactly like an outage, so it can never auto-approve.
+        MlScoreResponse mlResp = outcome.response();
+        boolean degraded = outcome.degraded() || mlResp == null || mlResp.riskScore() == null
+                || mlResp.action() == null || !ACTION_ORDER.contains(mlResp.action());
+
+        if (degraded) {
             finalAction = maxSeverity(ruleResult.action(), DEGRADED_FLOOR);
-            riskScore = BigDecimal.ZERO;
+            riskScore = null; // no model score exists; never show a fabricated 0
             modelVersion = "rules-only";
             combinedReasons.add("ML_UNAVAILABLE_RULES_ONLY");
         } else {
-            MlScoreResponse ml = outcome.response();
+            MlScoreResponse ml = mlResp;
             finalAction = maxSeverity(ruleResult.action(), ml.action());
             riskScore = ml.riskScore();
             anomalyScore = ml.anomalyScore();
@@ -113,11 +119,11 @@ public class DecisionService {
         decision.setReasonCodes(reasonCodes.toArray(new String[0]));
         decision.setShapTop(shapTopJson);
         decision.setLatencyMs(latencyMs);
-        decision.setDegraded(outcome.degraded());
+        decision.setDegraded(degraded);
         decisionRepository.save(decision);
 
         auditService.log(actorUsername, "SUBMIT_AND_SCORE", "application", app.getId().toString(),
-                "action=" + finalAction + " risk_score=" + riskScore + " latency_ms=" + latencyMs);
+                "action=" + finalAction + " risk_score=" + (riskScore == null ? "n/a" : riskScore) + " latency_ms=" + latencyMs);
 
         List<String> verificationSteps = finalAction.equals("STEP_UP")
                 ? List.of("Mobile OTP verification", "Aadhaar OTP e-KYC (offline XML)", "DigiLocker PAN fetch", "Penny-drop bank verification")
@@ -128,7 +134,7 @@ public class DecisionService {
                 : null;
 
         return new DecisionResponse(app.getId(), app.getExternalRef(), finalAction, riskScore, anomalyScore,
-                reasonCodes, shapTopJson, modelVersion, latencyMs, outcome.degraded(), verificationSteps, kfs);
+                reasonCodes, shapTopJson, modelVersion, latencyMs, degraded, verificationSteps, kfs);
     }
 
     private String buildKeyFactStatement(ApplicationSubmitRequest req) {

@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import { useCopilotQueryMutation } from '../app/api'
 import { Button } from './ui'
 
@@ -20,8 +20,9 @@ function GroundedTag({ grounded, provider, model, latencyMs }) {
         borderColor: grounded ? 'var(--color-riskdown)' : 'var(--color-a-stepup)',
       }}
     >
-      {grounded ? 'grounded ✓' : 'fallback template'} · {provider}/{model} ·{' '}
-      {latencyMs != null ? `${latencyMs}ms` : ''}
+      {grounded ? 'grounded ✓' : 'fallback template'}
+      {provider && model ? ` · ${provider}/${model}` : ''}
+      {latencyMs != null ? ` · ${latencyMs}ms` : ''}
     </span>
   )
 }
@@ -30,9 +31,12 @@ export default function CopilotChat({ applicationId }) {
   const [messages, setMessages] = useState([])
   const [input, setInput] = useState('')
   const [copilotQuery, { isLoading }] = useCopilotQueryMutation()
+  // Ref (not just isLoading) so a double-click/Enter in the same tick can't start two requests.
+  const inFlight = useRef(false)
 
   async function ask(question) {
-    if (!question.trim()) return
+    if (!question.trim() || inFlight.current) return
+    inFlight.current = true
     setMessages((m) => [...m, { role: 'user', text: question }])
     setInput('')
     try {
@@ -48,8 +52,15 @@ export default function CopilotChat({ applicationId }) {
           latencyMs: res.latency_ms,
         },
       ])
-    } catch {
-      setMessages((m) => [...m, { role: 'assistant', text: 'The copilot could not answer that right now.', grounded: false }])
+    } catch (err) {
+      const detail = typeof err?.data?.detail === 'string' ? err.data.detail : null
+      setMessages((m) => [...m, {
+        role: 'assistant',
+        text: detail || 'The copilot could not answer that right now.',
+        error: true,
+      }])
+    } finally {
+      inFlight.current = false
     }
   }
 
@@ -65,13 +76,15 @@ export default function CopilotChat({ applicationId }) {
           <div
             key={i}
             className={`border px-3 py-2 text-[13px] ${
-              m.role === 'user'
+              m.error
+                ? 'max-w-[92%] border-[#e3c2b6] bg-[#fdf4f1] text-[#9c3211]'
+                : m.role === 'user'
                 ? 'ml-auto max-w-[80%] border-signal/30 bg-[#eef1f8] text-ink'
                 : 'max-w-[92%] border-rule-soft bg-paper text-ink'
             }`}
           >
             {m.text}
-            {m.role === 'assistant' && (
+            {m.role === 'assistant' && !m.error && (
               <div className="mt-1.5">
                 <GroundedTag grounded={m.grounded} provider={m.provider} model={m.model} latencyMs={m.latencyMs} />
               </div>
@@ -86,7 +99,8 @@ export default function CopilotChat({ applicationId }) {
           <button
             key={q}
             onClick={() => ask(q)}
-            className="rounded-sm border border-rule bg-paper px-2 py-1 text-[11px] text-ink-muted hover:text-ink"
+            disabled={isLoading}
+            className="rounded-sm border border-rule bg-paper px-2 py-1 text-[11px] text-ink-muted hover:text-ink disabled:cursor-not-allowed disabled:opacity-50"
           >
             {q}
           </button>

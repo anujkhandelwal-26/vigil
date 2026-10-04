@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { Component, useState } from 'react'
 import { useSelector, useDispatch } from 'react-redux'
 import { setCredentials, logout } from './app/authSlice'
 import { useLoginMutation } from './app/api'
@@ -25,10 +25,15 @@ function SignIn({ onSignedIn }) {
       const res = await login({ username, password }).unwrap()
       dispatch(setCredentials(res))
       onSignedIn()
-    } catch {
-      // Deliberately uniform error text -- backend gives no signal about
-      // which field was wrong (see AuthController.java).
-      setError('Those details did not match an account.')
+    } catch (err) {
+      if (err?.status === 401) {
+        // Deliberately uniform error text -- backend gives no signal about
+        // which field was wrong (see AuthController.java).
+        setError('Those details did not match an account.')
+      } else {
+        // Network failure (FETCH_ERROR), timeout, 5xx: not the user's fault.
+        setError('The service is unavailable right now. Please try again in a moment.')
+      }
     }
   }
 
@@ -77,6 +82,30 @@ function SignIn({ onSignedIn }) {
   )
 }
 
+/** Keeps one bad payload from blanking the whole app; resets when `resetKey` changes. */
+class ErrorBoundary extends Component {
+  state = { error: null }
+
+  static getDerivedStateFromError(error) {
+    return { error }
+  }
+
+  componentDidUpdate(prev) {
+    if (this.state.error && prev.resetKey !== this.props.resetKey) this.setState({ error: null })
+  }
+
+  render() {
+    if (!this.state.error) return this.props.children
+    return (
+      <div className="mx-auto max-w-xl p-8 text-center">
+        <p className="text-[14px] font-medium text-[#9c3211]">This view hit an unexpected error.</p>
+        <p className="mt-1 text-[12px] text-ink-muted">{String(this.state.error?.message || this.state.error)}</p>
+        <Button className="mt-4" onClick={() => this.setState({ error: null })}>Try again</Button>
+      </div>
+    )
+  }
+}
+
 export default function App() {
   const { token, displayName, role } = useSelector((s) => s.auth)
   const dispatch = useDispatch()
@@ -120,8 +149,10 @@ export default function App() {
       </header>
 
       <main className="min-h-0 flex-1 overflow-y-auto bg-paper">
-        {surface === 'apply' && <ApplyDashboard />}
-        {surface === 'analyst' && <AnalystDashboard />}
+        <ErrorBoundary resetKey={surface}>
+          {surface === 'apply' && <ApplyDashboard />}
+          {surface === 'analyst' && <AnalystDashboard />}
+        </ErrorBoundary>
       </main>
     </div>
   )

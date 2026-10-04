@@ -1,5 +1,6 @@
 package com.vigil.config;
 
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.PropertyNamingStrategies;
 import org.springframework.context.annotation.Bean;
@@ -31,7 +32,9 @@ public class MlRestClientConfig {
 
     private RestClient build(VigilProperties props, int connectTimeoutMs, int readTimeoutMs) {
         ObjectMapper snakeCaseMapper = new ObjectMapper()
-                .setPropertyNamingStrategy(PropertyNamingStrategies.SNAKE_CASE);
+                .setPropertyNamingStrategy(PropertyNamingStrategies.SNAKE_CASE)
+                // A new ml-service response field must not silently degrade every score.
+                .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
         MappingJackson2HttpMessageConverter converter = new MappingJackson2HttpMessageConverter(snakeCaseMapper);
 
         SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();

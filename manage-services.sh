@@ -270,7 +270,10 @@ stop_db() {
 write_env() {
   [ -f "$BASE_DIR/.env" ] && return 0
   [ -f "$BASE_DIR/.env.example" ] || { err "no .env.example to copy from"; return 1; }
-  sed -e "s|^POSTGRES_PASSWORD=.*|POSTGRES_PASSWORD=$(openssl rand -hex 16)|" \
+  local pgpass
+  pgpass=$(openssl rand -hex 16)
+  sed -e "s|^POSTGRES_PASSWORD=.*|POSTGRES_PASSWORD=${pgpass}|" \
+      -e "s|^\(DATABASE_URL=postgresql://[^:]*:\)[^@]*@|\1${pgpass}@|" \
       -e "s|^VIGIL_JWT_SECRET=.*|VIGIL_JWT_SECRET=$(openssl rand -base64 48 | tr -d '\n')|" \
       -e "s|^VIGIL_DEMO_PASSWORD=.*|VIGIL_DEMO_PASSWORD=$(openssl rand -hex 12)|" \
       "$BASE_DIR/.env.example" > "$BASE_DIR/.env"
@@ -288,7 +291,12 @@ ensure_python_env() {
 ensure_node_modules() {
   [ -d "$UI_DIR/node_modules" ] && return 0
   info "installing frontend dependencies"
-  ( cd "$UI_DIR" && npm install >/dev/null 2>&1 ) && ok "frontend dependencies installed"
+  local log; log=$(mktemp)
+  if ( cd "$UI_DIR" && npm install >"$log" 2>&1 ); then
+    ok "frontend dependencies installed"; rm -f "$log"
+  else
+    err "npm install failed; last lines of the log:"; tail -n 20 "$log" >&2; rm -f "$log"; return 1
+  fi
 }
 
 bootstrap_first_time() {
@@ -344,7 +352,7 @@ export_app_env() { # $1=key — the env each layer needs, derived from .env
       export VIGIL_ML_SERVICE_URL="http://localhost:8001"
       export VIGIL_ML_TIMEOUT_MS="${VIGIL_ML_TIMEOUT_MS:-150}"
       export VIGIL_DEMO_PASSWORD="${VIGIL_DEMO_PASSWORD:-}"
-      export VIGIL_FLYWAY_LOCATION="filesystem:$BASE_DIR/db"
+      export VIGIL_FLYWAY_LOCATION="$BASE_DIR/db"
       export SERVER_PORT="${SERVER_PORT:-8081}"
       ;;
     # ml-service reads $BASE_DIR/.env itself (pydantic-settings env_file), and

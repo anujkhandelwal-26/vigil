@@ -29,7 +29,8 @@ public class Decision {
     @Column(name = "model_version", nullable = false)
     private String modelVersion;
 
-    @Column(name = "risk_score", nullable = false)
+    // Null on rules-only (degraded) decisions: there is no model score to show.
+    @Column(name = "risk_score")
     private BigDecimal riskScore;
 
     @Column(name = "anomaly_score")
