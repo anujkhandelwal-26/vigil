@@ -74,7 +74,7 @@ class ApplicationIn(BaseModel):
 
 class ShapContribution(BaseModel):
     feature: str
-    value: float
+    value: float | str | None  # categorical levels are strings; NaN/unseen is null
     contribution: float
     direction: str  # "increases_risk" | "decreases_risk"
 

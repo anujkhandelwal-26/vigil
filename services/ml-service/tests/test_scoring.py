@@ -115,3 +115,42 @@ def test_copilot_fallback_never_uses_ground_truth_label(monkeypatch):
     resp = main.copilot(CopilotRequest(application_id="a1", question="why?"))
     assert "MULE_ACCOUNT_RING" not in resp.answer
     assert "REVIEW" in resp.answer and "[DEVICE_REUSE_HIGH]" in resp.answer
+
+
+def test_categorical_feature_in_shap_top_does_not_crash(monkeypatch):
+    import numpy as np
+    import pandas as pd
+
+    X = pd.DataFrame([{"employment_type": "SALARIED", "amount_inr": 50000.0, "residence_type": np.nan}])
+
+    class FakeModel:
+        def predict_proba(self, X): return np.array([[0.3, 0.7]])
+
+    class FakeExplainer:
+        def shap_values(self, X): return np.array([[0.9, 0.5, -0.2]])
+
+    monkeypatch.setattr(scoring, "build_feature_vector", lambda d: X)
+    monkeypatch.setattr(scoring, "_anomaly_score", lambda X, s: 0.0)
+    monkeypatch.setattr(scoring, "_STATE", {
+        "model": FakeModel(), "explainer": FakeExplainer(), "version": "vT",
+        "thresholds": {"low": 0.2, "high": 0.5, "decline": 0.9},
+    })
+    out = scoring.score_application({})
+    values = {s["feature"]: s["value"] for s in out["shap_top"]}
+    assert values == {"employment_type": "SALARIED", "amount_inr": 50000.0, "residence_type": None}
+
+
+def test_retrain_metrics_carry_every_cost_curve_key(monkeypatch):
+    import numpy as np
+    from app import main
+    from app.training.train import COST_CURVE_KEYS, cost_metrics
+
+    y = np.array([0, 0, 1, 0, 1, 0])
+    s = np.array([0.1, 0.2, 0.9, 0.6, 0.7, 0.3])
+    m = cost_metrics(y, s, 1234.0, 0.15, 0.45, 0.75)
+    assert set(COST_CURVE_KEYS) <= set(m)
+    assert all(m[k] is not None for k in COST_CURVE_KEYS)
+    monkeypatch.setattr(scoring, "_STATE", {"metrics": m})
+    resp = main.cost_curve()
+    for k in COST_CURVE_KEYS:
+        assert resp[k] is not None

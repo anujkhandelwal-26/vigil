@@ -7,6 +7,7 @@ be something the guardrail can verify the narrative against.
 from __future__ import annotations
 
 from app import retrieval
+from app.copilot.guardrails import sanitize_ref
 from app.db import get_conn
 
 _ENTITY_FIELD_KEYWORDS = [
@@ -53,6 +54,11 @@ def _get_latest_decision(application_id: str) -> dict | None:
         return dict(zip(cols, row))
 
 
+def fmt_risk(score) -> str:
+    """risk_score is NULL for rules-only decisions (ML was down)."""
+    return "n/a (rules-only)" if score is None else str(score)
+
+
 def _reason_titles() -> dict[str, str]:
     return {rc["code"]: rc["title"] for rc in retrieval.get_reason_code_catalogue()}
 
@@ -64,8 +70,8 @@ def explain_decision(application: dict, application_id: str) -> tuple[str, list[
     titles = _reason_titles()
     reasons = ", ".join(f"{c} ({titles.get(c, c)})" for c in (d["reason_codes"] or []))
     text = (
-        f"Application {application['external_ref']}: action={d['action']}, "
-        f"risk_score={d['risk_score']}, model_version={d['model_version']}, "
+        f"Application {sanitize_ref(application['external_ref'])}: action={d['action']}, "
+        f"risk_score={fmt_risk(d['risk_score'])}, model_version={d['model_version']}, "
         f"latency_ms={d['latency_ms']}. Reason codes: {reasons or 'none'}."
     )
     return text, [application_id]
@@ -114,12 +120,12 @@ def case_summary(application: dict, application_id: str) -> tuple[str, list[str]
         )
         fb = cur.fetchone()
     parts = [
-        f"Application {application['external_ref']} for INR {application['amount_inr']} "
+        f"Application {sanitize_ref(application['external_ref'])} for INR {application['amount_inr']} "
         f"({application['product']}, {application['tenure_months']} months), "
         f"submitted via {application['channel']}."
     ]
     if d:
-        parts.append(f"Decision: {d['action']} at risk_score={d['risk_score']}.")
+        parts.append(f"Decision: {d['action']} at risk_score={fmt_risk(d['risk_score'])}.")
     if fb:
         parts.append(f"Analyst verdict on file: {fb[0]}.")
     return " ".join(parts), [application_id]
@@ -136,7 +142,7 @@ def entity_lookup(application: dict, application_id: str, question: str) -> tupl
     rows = retrieval.entity_lookup(field, value, exclude_application_id=application_id)
     if not rows:
         return f"No other applications on file share this {field.replace('_', ' ')}.", [application_id]
-    lines = [f"{r['external_ref']} (action={r['action']}, risk_score={r['risk_score']})" for r in rows]
+    lines = [f"{sanitize_ref(r['external_ref'])} (action={r['action']}, risk_score={fmt_risk(r['risk_score'])})" for r in rows]
     text = f"{len(rows)} other application(s) on file share this {field.replace('_', ' ')}: " + "; ".join(lines) + "."
     return text, [application_id] + [r["external_ref"] for r in rows]
 
@@ -148,7 +154,7 @@ def similar_cases(application_id: str, embedding: list[float] | None) -> tuple[s
     if not rows:
         return "No similar past cases found in the case index.", [application_id]
     lines = [
-        f"{r['external_ref']} (distance={round(r['distance'], 3)}, action={r['action']}, "
+        f"{sanitize_ref(r['external_ref'])} (distance={round(r['distance'], 3)}, action={r['action']}, "
         f"analyst_verdict={r['analyst_verdict'] or 'none'})"
         for r in rows
     ]

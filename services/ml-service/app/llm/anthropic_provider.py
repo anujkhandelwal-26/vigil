@@ -22,10 +22,15 @@ class AnthropicProvider(LlmProvider):
         return self._model
 
     def complete(self, system_prompt: str, user_prompt: str, max_tokens: int = 300) -> str:
+        kwargs = {"system": system_prompt} if system_prompt else {}
         resp = self.client.messages.create(
             model=self._model,
             max_tokens=max_tokens,
-            system=system_prompt,
             messages=[{"role": "user", "content": user_prompt}],
+            **kwargs,
         )
-        return resp.content[0].text.strip()
+        # The first block isn't guaranteed to be text.
+        for block in resp.content:
+            if getattr(block, "type", None) == "text":
+                return block.text.strip()
+        return ""

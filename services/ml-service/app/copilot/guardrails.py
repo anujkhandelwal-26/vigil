@@ -8,6 +8,7 @@ the last word on whether its own output was safe.
 from __future__ import annotations
 
 import re
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 
 REASON_CODE_PATTERN = re.compile(r"\[([A-Z0-9_]+)\]")
 NUMBER_PATTERN = re.compile(r"(?<![\w.])\d[\d,]*\.?\d*%?")
@@ -36,8 +37,43 @@ def _extract_reason_codes(text: str) -> list[str]:
     return REASON_CODE_PATTERN.findall(text)
 
 
+def extract_reason_codes(text: str) -> list[str]:
+    return _extract_reason_codes(text)
+
+
 def _extract_numbers(text: str) -> list[str]:
-    return [n.replace(",", "") for n in NUMBER_PATTERN.findall(text)]
+    # Strip thousands separators and a sentence-final '.' ("83." -> "83").
+    return [n.replace(",", "").rstrip(".") for n in NUMBER_PATTERN.findall(text)]
+
+
+def _to_decimal(num: str) -> Decimal | None:
+    try:
+        return Decimal(num.rstrip("%"))
+    except InvalidOperation:
+        return None
+
+
+def _decimals(d: Decimal) -> int:
+    return max(-d.as_tuple().exponent, 0)
+
+
+def _number_supported(num: str, context_values: list[Decimal]) -> bool:
+    """Numeric match: equal as numbers, or equal to a context number rounded
+    to the narrative's own precision ("0.62" for a context "0.6234")."""
+    n = _to_decimal(num)
+    if n is None:
+        return False
+    places = _decimals(n)
+    quantum = Decimal(1).scaleb(-places)
+    for c in context_values:
+        if c == n:
+            return True
+        try:
+            if c.quantize(quantum, rounding=ROUND_HALF_UP) == n:
+                return True
+        except InvalidOperation:
+            continue  # context number too large to quantise: not a match
+    return False
 
 
 def validate(
@@ -68,7 +104,7 @@ def validate(
         if code not in whitelisted_codes:
             violations.append(f"non_whitelisted_reason_code:{code}")
 
-    context_numbers = set(_extract_numbers(context_text))
+    context_values = [v for v in map(_to_decimal, set(_extract_numbers(context_text))) if v is not None]
     narrative_numbers = _extract_numbers(narrative)
     for num in narrative_numbers:
         # Allow small integers (list positions, counts like "3" signals) that
@@ -76,10 +112,18 @@ def validate(
         # fabricated fact; only flag numbers that look like a genuine
         # data point (2+ digits, or a decimal, or a %) absent from context.
         looks_like_data_point = len(num.replace(".", "").replace("%", "")) >= 2
-        if looks_like_data_point and num not in context_numbers:
+        if looks_like_data_point and not _number_supported(num, context_values):
             violations.append(f"unsupported_number:{num}")
 
     return (len(violations) == 0), violations
+
+
+# Role markers a prompt-injection attempt uses to impersonate a turn:
+# "SYSTEM:", "system :", "### system", "assistant:", "user:".
+_ROLE_MARKER = re.compile(
+    r"(?:#+\s*)?\b(?:system|assistant|user|human)\b\s*:|#+\s*(?:system|assistant|user|human)\b",
+    re.IGNORECASE,
+)
 
 
 def sanitize_input(text: str) -> str:
@@ -90,9 +134,17 @@ def sanitize_input(text: str) -> str:
     """
     if not text:
         return ""
-    text = text.replace("SYSTEM:", "").replace("RULES", "").replace("```", "")
+    text = text.replace("```", "")
+    text = _ROLE_MARKER.sub(" ", text)
+    text = re.sub(r"\bRULES\b", "", text)
     text = re.sub(r"[\r\n]+", " ", text)
     return text[:500]
+
+
+def sanitize_ref(text) -> str:
+    """For applicant-controlled strings (external_ref) that land in LLM
+    context: same neutralisation as analyst text, tighter length cap."""
+    return sanitize_input(str(text) if text is not None else "")[:64]
 
 
 def deterministic_fallback(action: str, reason_codes: list[str], reason_titles: dict[str, str]) -> str:
