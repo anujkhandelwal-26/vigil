@@ -4,12 +4,14 @@ import com.vigil.domain.ModelRegistry;
 import com.vigil.repo.ModelRegistryRepository;
 import com.vigil.service.AuditService;
 import com.vigil.service.MlClient;
+import org.springframework.http.HttpStatus;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.security.core.Authentication;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.server.ResponseStatusException;
 
 import java.util.List;
 import java.util.Map;
@@ -48,6 +50,9 @@ public class ModelController {
     @PreAuthorize("hasRole('ADMIN')")
     public Map<String, Object> retrain(Authentication auth) {
         Map<String, Object> result = mlClient.retrain();
+        if (result == null || !result.containsKey("version") || !result.containsKey("promoted")) {
+            throw new ResponseStatusException(HttpStatus.BAD_GATEWAY, "ml-service returned an unexpected retrain response");
+        }
         auditService.log(auth.getName(), "RETRAIN", "model", String.valueOf(result.get("version")),
                 "promoted=" + result.get("promoted") + " pr_auc=" + result.get("pr_auc"));
         return result;

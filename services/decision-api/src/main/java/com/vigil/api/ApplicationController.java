@@ -6,7 +6,9 @@ import com.vigil.api.dto.DecisionResponse;
 import com.vigil.api.dto.FeedbackRequest;
 import com.vigil.domain.AnalystFeedback;
 import com.vigil.domain.Application;
+import com.vigil.domain.AppUser;
 import com.vigil.repo.AnalystFeedbackRepository;
+import com.vigil.repo.AppUserRepository;
 import com.vigil.repo.ApplicationRepository;
 import com.vigil.repo.DecisionRepository;
 import com.vigil.service.AuditService;
@@ -14,10 +16,12 @@ import com.vigil.service.DecisionService;
 import com.vigil.service.MlClient;
 import com.vigil.service.QueryService;
 import jakarta.validation.Valid;
+import jakarta.validation.constraints.Max;
+import jakarta.validation.constraints.Min;
+import jakarta.validation.constraints.Pattern;
 import org.springframework.security.core.Authentication;
 import org.springframework.web.bind.annotation.*;
 
-import java.math.BigDecimal;
 import java.util.List;
 import java.util.Map;
 import java.util.NoSuchElementException;
@@ -34,11 +38,12 @@ public class ApplicationController {
     private final AnalystFeedbackRepository feedbackRepository;
     private final MlClient mlClient;
     private final AuditService auditService;
+    private final AppUserRepository appUserRepository;
 
     public ApplicationController(DecisionService decisionService, QueryService queryService,
                                   ApplicationRepository applicationRepository, DecisionRepository decisionRepository,
                                   AnalystFeedbackRepository feedbackRepository, MlClient mlClient,
-                                  AuditService auditService) {
+                                  AuditService auditService, AppUserRepository appUserRepository) {
         this.decisionService = decisionService;
         this.queryService = queryService;
         this.applicationRepository = applicationRepository;
@@ -46,6 +51,7 @@ public class ApplicationController {
         this.feedbackRepository = feedbackRepository;
         this.mlClient = mlClient;
         this.auditService = auditService;
+        this.appUserRepository = appUserRepository;
     }
 
     @PostMapping
@@ -54,8 +60,9 @@ public class ApplicationController {
     }
 
     @GetMapping
-    public List<ApplicationSummary> list(@RequestParam(defaultValue = "ALL") String action,
-                                          @RequestParam(defaultValue = "100") int limit) {
+    public List<ApplicationSummary> list(@RequestParam(defaultValue = "ALL")
+                                          @Pattern(regexp = "ALL|APPROVE|STEP_UP|REVIEW|DECLINE") String action,
+                                          @RequestParam(defaultValue = "100") @Min(1) @Max(500) int limit) {
         return queryService.listQueue(action, limit);
     }
 
@@ -91,7 +98,9 @@ public class ApplicationController {
         fb.setApplicationId(id);
         fb.setVerdict(req.verdict());
         fb.setOriginalAction(decision.getAction());
-        fb.setOriginalScore(decision.getRiskScore() == null ? BigDecimal.ZERO : decision.getRiskScore());
+        // Null for rules-only (degraded) decisions: there was no model score to record.
+        fb.setOriginalScore(decision.getRiskScore());
+        fb.setAnalystId(appUserRepository.findByUsername(auth.getName()).map(AppUser::getId).orElse(null));
         fb.setWasFalsePositive("LEGIT".equals(req.verdict()) &&
                 ("DECLINE".equals(decision.getAction()) || "REVIEW".equals(decision.getAction())));
         fb.setNote(req.note());

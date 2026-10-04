@@ -2,6 +2,7 @@ package com.vigil.api;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.vigil.repo.AnalystFeedbackRepository;
+import com.vigil.repo.AppUserRepository;
 import com.vigil.repo.ApplicationRepository;
 import com.vigil.repo.DecisionRepository;
 import com.vigil.service.AuditService;
@@ -20,6 +21,7 @@ import org.springframework.test.web.servlet.MockMvc;
 import java.util.HashMap;
 import java.util.Map;
 
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
@@ -48,6 +50,7 @@ class ApplicationControllerValidationTest {
     @MockitoBean private AnalystFeedbackRepository feedbackRepository;
     @MockitoBean private MlClient mlClient;
     @MockitoBean private AuditService auditService;
+    @MockitoBean private AppUserRepository appUserRepository;
     @MockitoBean private JwtService jwtService;
 
     private Map<String, Object> validPayload() {
@@ -127,6 +130,50 @@ class ApplicationControllerValidationTest {
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(objectMapper.writeValueAsString(payload)))
                 .andExpect(status().isBadRequest());
+    }
+
+    @Test
+    void rejectsExternalRefOutsideAllowedPatternWith400() throws Exception {
+        for (String bad : new String[] {"has space", "-leading", "a".repeat(65), "x'; DROP"}) {
+            Map<String, Object> payload = validPayload();
+            payload.put("externalRef", bad);
+            mockMvc.perform(post("/api/v1/applications")
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content(objectMapper.writeValueAsString(payload)))
+                    .andExpect(status().isBadRequest());
+        }
+    }
+
+    @Test
+    void rejectsNumericOverflowingTheColumnWith400() throws Exception {
+        Map<String, Object> payload = validPayload();
+        payload.put("creditUtilisationPct", 1000); // NUMERIC(5,2) holds at most 999.99
+
+        mockMvc.perform(post("/api/v1/applications")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(payload)))
+                .andExpect(status().isBadRequest());
+    }
+
+    @Test
+    void rejectsMalformedJsonWith400() throws Exception {
+        mockMvc.perform(post("/api/v1/applications")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{not json"))
+                .andExpect(status().isBadRequest());
+    }
+
+    @Test
+    void rejectsOutOfRangeLimitWith400() throws Exception {
+        for (String limit : new String[] {"-1", "0", "501", "abc"}) {
+            mockMvc.perform(get("/api/v1/applications").param("limit", limit))
+                    .andExpect(status().isBadRequest());
+        }
+    }
+
+    @Test
+    void rejectsMalformedIdPathVariableWith400() throws Exception {
+        mockMvc.perform(get("/api/v1/applications/not-a-uuid")).andExpect(status().isBadRequest());
     }
 
     @Test

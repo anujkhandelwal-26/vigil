@@ -1,7 +1,11 @@
 package com.vigil.service;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
+
+import java.util.Collections;
 
 /**
  * Every decision, override and retrain is written here with actor and
@@ -14,19 +18,22 @@ public class AuditService {
 
     private final JdbcTemplate jdbcTemplate;
 
-    public AuditService(JdbcTemplate jdbcTemplate) {
+    private final ObjectMapper objectMapper;
+
+    public AuditService(JdbcTemplate jdbcTemplate, ObjectMapper objectMapper) {
         this.jdbcTemplate = jdbcTemplate;
+        this.objectMapper = objectMapper;
     }
 
     public void log(String actor, String action, String entity, String entityId, String note) {
-        String payload = "{\"note\": " + quoteJson(note) + "}";
+        String payload;
+        try {
+            payload = objectMapper.writeValueAsString(Collections.singletonMap("note", note));
+        } catch (JsonProcessingException e) {
+            throw new IllegalStateException("cannot serialise audit payload", e);
+        }
         jdbcTemplate.update(
                 "INSERT INTO audit_log (actor, action, entity, entity_id, payload) VALUES (?, ?, ?, ?, ?::jsonb)",
                 actor, action, entity, entityId, payload);
-    }
-
-    private String quoteJson(String s) {
-        if (s == null) return "null";
-        return "\"" + s.replace("\\", "\\\\").replace("\"", "\\\"") + "\"";
     }
 }

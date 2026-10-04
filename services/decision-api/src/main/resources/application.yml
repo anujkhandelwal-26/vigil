@@ -16,7 +16,10 @@ spring:
   flyway:
     enabled: true
     locations: filesystem:${VIGIL_FLYWAY_LOCATION:../../db}
+    # Databases created by the old manual psql path already have V1-V3 applied
+    # but no flyway history, so they are baselined at 3 and only V4+ runs.
     baseline-on-migrate: true
+    baseline-version: 3
 
 server:
   port: ${SERVER_PORT:8081}

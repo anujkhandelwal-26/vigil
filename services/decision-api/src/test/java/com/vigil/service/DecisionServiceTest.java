@@ -5,6 +5,7 @@ import com.vigil.api.dto.ApplicationSubmitRequest;
 import com.vigil.api.dto.DecisionResponse;
 import com.vigil.api.dto.MlScoreResponse;
 import com.vigil.domain.Application;
+import com.vigil.domain.Decision;
 import com.vigil.repo.ApplicationRepository;
 import com.vigil.repo.DecisionRepository;
 import org.junit.jupiter.api.BeforeEach;
@@ -36,6 +37,7 @@ import static org.mockito.Mockito.when;
 class DecisionServiceTest {
 
     private ApplicationRepository applicationRepository;
+    private DecisionRepository decisionRepository;
     private MlClient mlClient;
     private DecisionService service;
 
@@ -48,7 +50,8 @@ class DecisionServiceTest {
             a.setId(UUID.randomUUID());
             return a;
         });
-        service = new DecisionService(applicationRepository, mock(DecisionRepository.class),
+        decisionRepository = mock(DecisionRepository.class);
+        service = new DecisionService(applicationRepository, decisionRepository,
                 new FeatureAssembler(applicationRepository), new RuleEngine(), mlClient,
                 mock(AuditService.class), new ObjectMapper());
     }
@@ -125,6 +128,44 @@ class DecisionServiceTest {
         assertTrue(resp.degraded());
         assertTrue(resp.reasonCodes().contains("ML_UNAVAILABLE_RULES_ONLY"));
         assertNull(resp.keyFactStatement(), "no loan offer is made on a degraded decision");
+    }
+
+    @Test
+    void mlResponseWithNullActionIsTreatedAsDegradedNeverApprove() {
+        when(mlClient.score(any())).thenReturn(new MlClient.ScoreOutcome(new MlScoreResponse(
+                BigDecimal.valueOf(0.01), BigDecimal.valueOf(0.1), null, List.of(), List.of(), "v1.0.0", 5), false));
+        DecisionResponse resp = service.submitAndScore(cleanRequest(), "analyst");
+
+        assertEquals(DecisionService.DEGRADED_FLOOR, resp.action());
+        assertTrue(resp.degraded());
+        assertTrue(resp.reasonCodes().contains("ML_UNAVAILABLE_RULES_ONLY"));
+        assertNull(resp.riskScore());
+    }
+
+    @Test
+    void mlResponseWithUnknownActionOrNullScoreIsDegraded() {
+        when(mlClient.score(any())).thenReturn(new MlClient.ScoreOutcome(new MlScoreResponse(
+                BigDecimal.valueOf(0.01), null, "WAVE_THROUGH", List.of(), List.of(), "v1.0.0", 5), false));
+        assertTrue(service.submitAndScore(cleanRequest(), "analyst").degraded());
+
+        when(mlClient.score(any())).thenReturn(new MlClient.ScoreOutcome(new MlScoreResponse(
+                null, null, "APPROVE", List.of(), List.of(), "v1.0.0", 5), false));
+        DecisionResponse resp = service.submitAndScore(cleanRequest(), "analyst");
+        assertTrue(resp.degraded());
+        assertEquals(DecisionService.DEGRADED_FLOOR, resp.action());
+    }
+
+    @Test
+    void nullResponseWithoutDegradedFlagIsPersistedAsDegradedWithNullScore() {
+        when(mlClient.score(any())).thenReturn(new MlClient.ScoreOutcome(null, false));
+        DecisionResponse resp = service.submitAndScore(cleanRequest(), "analyst");
+
+        assertTrue(resp.degraded());
+        assertNull(resp.riskScore(), "rules-only decisions carry no model score");
+        ArgumentCaptor<Decision> saved = ArgumentCaptor.forClass(Decision.class);
+        verify(decisionRepository).save(saved.capture());
+        assertTrue(saved.getValue().getDegraded());
+        assertNull(saved.getValue().getRiskScore());
     }
 
     @Test
