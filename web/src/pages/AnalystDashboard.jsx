@@ -17,15 +17,33 @@ const inr = (value) =>
     style: 'currency', currency: 'INR', maximumFractionDigits: 0,
   }).format(Number(value))
 
+const score3 = (v) => (v == null ? '—' : Number(v).toFixed(3))
+
+const errorText = (err, fallback) =>
+  (typeof err?.data?.detail === 'string' && err.data.detail) || fallback
+
+// Rendered with key={selectedId}, so note, narrative and copilot state are per-case.
+// currentData (unlike data) is undefined while a different id is loading, so the
+// previous case is never shown under the new id's buttons.
 function CaseDetail({ id, onFeedbackDone }) {
-  const { data, isLoading } = useGetApplicationDetailQuery(id, { skip: !id })
-  const { data: ringData } = useGetRingQuery(id, { skip: !id })
+  const { currentData: data, isError, error } = useGetApplicationDetailQuery(id, { skip: !id })
+  const { currentData: ringData } = useGetRingQuery(id, { skip: !id })
   const [getNarrative, narrativeState] = useLazyGetNarrativeQuery()
   const [submitFeedback, { isLoading: fbLoading }] = useSubmitFeedbackMutation()
   const [note, setNote] = useState('')
+  const [feedbackMsg, setFeedbackMsg] = useState(null)
 
   if (!id) return <Panel><Empty>Select a case from the queue to see details.</Empty></Panel>
-  if (isLoading || !data) return <Panel><Empty>Loading case…</Empty></Panel>
+  if (isError && !data) {
+    return (
+      <Panel>
+        <p className="py-8 text-center text-[13px] text-[#9c3211]">
+          {errorText(error, 'Could not load this case. Select it again to retry.')}
+        </p>
+      </Panel>
+    )
+  }
+  if (!data) return <Panel><Empty>Loading case…</Empty></Panel>
 
   const app = data.application
   const decision = data.decision
@@ -35,14 +53,22 @@ function CaseDetail({ id, onFeedbackDone }) {
   } catch {
     shapTop = null
   }
+  if (!Array.isArray(shapTop)) shapTop = null
 
   async function handleFeedback(verdict) {
-    await submitFeedback({ id, verdict, note }).unwrap()
-    setNote('')
-    onFeedbackDone?.()
+    setFeedbackMsg(null)
+    try {
+      await submitFeedback({ id, verdict, note }).unwrap()
+      setNote('')
+      setFeedbackMsg({ ok: true, text: verdict === 'FRAUD' ? 'Marked as fraud. Thank you.' : 'Marked as legitimate. Thank you.' })
+      onFeedbackDone?.()
+    } catch (err) {
+      setFeedbackMsg({ ok: false, text: errorText(err, 'Could not save your verdict. Please try again.') })
+    }
   }
 
-  const noveltyGap = decision?.anomalyScore != null
+  // riskScore is null for rules-only (degraded) decisions: never treat that as 0.
+  const noveltyGap = decision?.anomalyScore != null && decision?.riskScore != null
     && Number(decision.anomalyScore) > 0.85 && Number(decision.riskScore) < 0.15
 
   return (
@@ -57,9 +83,9 @@ function CaseDetail({ id, onFeedbackDone }) {
               Novel pattern detected
             </p>
             <p className="mt-1 text-[12px] leading-relaxed text-ink-muted">
-              The supervised model scores this application as low-risk ({Number(decision.riskScore).toFixed(3)}) —
+              The supervised model scores this application as low-risk ({score3(decision.riskScore)}) —
               it has never seen this behavioural signature in training. But the unsupervised novelty
-              channel flags it as highly anomalous ({Number(decision.anomalyScore).toFixed(3)}). This is
+              channel flags it as highly anomalous ({score3(decision.anomalyScore)}). This is
               exactly the gap a purely supervised system would miss: a fraud typology the model was
               never trained on. Confirm with the copilot / feedback loop below and retrain.
             </p>
@@ -82,7 +108,11 @@ function CaseDetail({ id, onFeedbackDone }) {
         )}
 
         <div className="mb-5 grid grid-cols-2 gap-3 sm:grid-cols-4">
-          <KpiTile label="Risk score" value={decision ? Number(decision.riskScore).toFixed(3) : '—'} />
+          <KpiTile
+            label="Risk score"
+            value={score3(decision?.riskScore)}
+            sub={decision && decision.riskScore == null ? 'rules-only (ML unavailable)' : undefined}
+          />
           <KpiTile label="Anomaly score" value={decision?.anomalyScore != null ? Number(decision.anomalyScore).toFixed(3) : '—'} />
           <KpiTile label="Latency" value={decision?.latencyMs != null ? `${decision.latencyMs}ms` : '—'} />
           <KpiTile label="Model" value={decision?.modelVersion ?? '—'} />
@@ -161,6 +191,10 @@ function CaseDetail({ id, onFeedbackDone }) {
               {narrativeState.data.cached ? 'cached' : `${narrativeState.data.latency_ms}ms`}
             </span>
           </div>
+        ) : narrativeState.isError ? (
+          <p className="py-8 text-center text-[13px] text-[#9c3211]">
+            {errorText(narrativeState.error, 'Could not generate a narrative right now. Try again.')}
+          </p>
         ) : (
           <Empty>No narrative generated yet.</Empty>
         )}
@@ -180,6 +214,15 @@ function CaseDetail({ id, onFeedbackDone }) {
             className="mt-1 w-full border border-rule bg-surface px-2.5 py-1.5 text-[13px]"
           />
         </label>
+        {feedbackMsg && (
+          <p
+            role="status"
+            className="mb-3 text-[13px]"
+            style={{ color: feedbackMsg.ok ? 'var(--color-riskdown)' : '#9c3211' }}
+          >
+            {feedbackMsg.text}
+          </p>
+        )}
         <div className="flex gap-2">
           <Button variant="danger" disabled={fbLoading} onClick={() => handleFeedback('FRAUD')}>Confirm fraud</Button>
           <Button variant="success" disabled={fbLoading} onClick={() => handleFeedback('LEGIT')}>Mark legitimate</Button>
@@ -313,7 +356,9 @@ export default function AnalystDashboard() {
                     <td className="py-1.5">{a.product}</td>
                     <td className="tnum py-1.5">{inr(a.amountInr)}</td>
                     <td className="py-1.5"><ActionBadge action={a.action} /></td>
-                    <td className="tnum py-1.5">{a.riskScore != null ? Number(a.riskScore).toFixed(2) : '—'}</td>
+                    <td className="tnum py-1.5" title={a.riskScore == null ? 'rules-only decision (ML unavailable)' : undefined}>
+                      {a.riskScore != null ? Number(a.riskScore).toFixed(2) : '—'}
+                    </td>
                     <td className="tnum py-1.5 text-right text-ink-faint">{a.latencyMs ?? '—'}ms</td>
                   </tr>
                 ))}
@@ -375,7 +420,7 @@ export default function AnalystDashboard() {
           </Panel>
         </div>
 
-        <CaseDetail id={selectedId} onFeedbackDone={refetch} />
+        <CaseDetail key={selectedId} id={selectedId} onFeedbackDone={refetch} />
       </div>
     </div>
   )

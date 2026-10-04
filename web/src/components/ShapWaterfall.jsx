@@ -12,14 +12,27 @@ import { Empty } from './ui'
 const RISK_UP = 'var(--color-riskup)'
 const RISK_DOWN = 'var(--color-riskdown)'
 
+/** Feature value: number, categorical level (string) or null. */
+function formatValue(v) {
+  if (v == null) return '—'
+  if (typeof v === 'number') return Number.isFinite(v) ? String(Number(v.toFixed(3))) : '—'
+  return String(v)
+}
+
 export default function ShapWaterfall({ shapTop }) {
   const [hovered, setHovered] = useState(null)
 
-  if (!shapTop || shapTop.length === 0) {
+  // Payload comes from the server as JSON: tolerate non-arrays and bad rows.
+  const rows = Array.isArray(shapTop)
+    ? shapTop.filter((s) => s && Number.isFinite(Number(s.contribution))
+        && s.contribution !== null && s.contribution !== '')
+    : []
+
+  if (rows.length === 0) {
     return <Empty>No SHAP explanation available for this decision.</Empty>
   }
 
-  const max = Math.max(...shapTop.map((s) => Math.abs(s.contribution)), 1e-6)
+  const max = Math.max(...rows.map((s) => Math.abs(Number(s.contribution))), 1e-6)
 
   return (
     <div>
@@ -35,9 +48,10 @@ export default function ShapWaterfall({ shapTop }) {
       </div>
 
       <ul className="space-y-1.5">
-        {shapTop.map((s, i) => {
+        {rows.map((s, i) => {
+          const contribution = Number(s.contribution)
           const up = s.direction === 'increases_risk'
-          const width = (Math.abs(s.contribution) / max) * 50
+          const width = (Math.abs(contribution) / max) * 50
           const active = hovered === s.feature
           return (
             <li
@@ -49,6 +63,7 @@ export default function ShapWaterfall({ shapTop }) {
               <div>
                 <div className="mb-1 flex items-baseline justify-between gap-2">
                   <span className="hash text-ink" title={s.feature}>{s.feature}</span>
+                  <span className="tnum text-[11px] text-ink-faint">{formatValue(s.value)}</span>
                 </div>
                 <div className="relative h-3 bg-rule-soft/60">
                   <div className="absolute inset-y-0 left-1/2 w-px bg-rule" />
@@ -65,7 +80,7 @@ export default function ShapWaterfall({ shapTop }) {
                 </div>
               </div>
               <span className="tnum w-16 text-right text-[11px] text-ink-muted">
-                {s.contribution > 0 ? '+' : ''}{s.contribution.toFixed(3)}
+                {contribution > 0 ? '+' : ''}{contribution.toFixed(3)}
               </span>
             </li>
           )

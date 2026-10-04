@@ -1,6 +1,7 @@
 import { createApi, fetchBaseQuery } from '@reduxjs/toolkit/query/react'
+import { logout, isTokenExpired } from './authSlice'
 
-const baseQuery = fetchBaseQuery({
+const rawBaseQuery = fetchBaseQuery({
   baseUrl: '/api/v1',
   prepareHeaders: (headers, { getState }) => {
     const token = getState().auth.token
@@ -8,6 +9,22 @@ const baseQuery = fetchBaseQuery({
     return headers
   },
 })
+
+// Any authenticated request that comes back 401 (or goes out with an expired
+// token) means the session is over: log out, which also clears the query cache
+// (see store.js) so nothing from this session is shown to the next user.
+const baseQuery = async (args, apiCtx, extra) => {
+  const token = apiCtx.getState().auth.token
+  if (token && isTokenExpired(token)) {
+    apiCtx.dispatch(logout())
+    return { error: { status: 401, data: { detail: 'Session expired' } } }
+  }
+  const result = await rawBaseQuery(args, apiCtx, extra)
+  if (result.error?.status === 401 && token && apiCtx.endpoint !== 'login') {
+    apiCtx.dispatch(logout())
+  }
+  return result
+}
 
 export const api = createApi({
   reducerPath: 'api',

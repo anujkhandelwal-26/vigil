@@ -10,7 +10,12 @@
 import { randomSample } from '../demo-fixtures/index.js'
 
 function freshRef() {
-  return `APP-DEMO-${Math.floor(Math.random() * 999999)}`
+  // Must match the backend's ^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$ and stay unique
+  // (the column is UNIQUE): timestamp + random suffix. crypto.randomUUID only
+  // exists in secure contexts, so plain-http LAN access falls back to Math.random.
+  const rand = globalThis.crypto?.randomUUID?.().slice(0, 8)
+    ?? Math.random().toString(36).slice(2, 10)
+  return `APP-DEMO-${Date.now().toString(36)}-${rand}`
 }
 
 export const SCENARIOS = {
