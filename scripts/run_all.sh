@@ -19,44 +19,37 @@ sleep 1
 
 echo "==> db"
 docker compose up -d db
-for i in $(seq 1 30); do
-  status=$(docker inspect --format='{{.State.Health.Status}}' vigil-db 2>/dev/null || echo starting)
-  [ "$status" = "healthy" ] && break
-  sleep 1
-done
-echo "    db healthy"
+wait_ok() { # $1=label, rest=command that succeeds when ready; 60 tries, 1s apart (override with WAIT_TRIES)
+  local label=$1; shift
+  for i in $(seq 1 "${WAIT_TRIES:-60}"); do
+    "$@" >/dev/null 2>&1 && { echo "    $label healthy"; return 0; }
+    sleep 1
+  done
+  echo "ERROR: $label did not become healthy in time (see /tmp/vigil-*.log)" >&2
+  exit 1
+}
+db_healthy() { [ "$(docker inspect --format='{{.State.Health.Status}}' vigil-db 2>/dev/null || echo starting)" = "healthy" ]; }
+wait_ok db db_healthy
 
 echo "==> ml-service"
 (cd services/ml-service && nohup .venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8001 \
   > /tmp/vigil-ml-service.log 2>&1 &)
-for i in $(seq 1 30); do
-  curl -sf http://localhost:8001/health > /dev/null 2>&1 && break
-  sleep 1
-done
-echo "    ml-service healthy"
+wait_ok ml-service curl -sf http://localhost:8001/health
 
 echo "==> decision-api"
 export SPRING_DATASOURCE_URL="jdbc:postgresql://localhost:5433/${POSTGRES_DB:-vigil}"
 export SPRING_DATASOURCE_USERNAME="${POSTGRES_USER:-vigil}"
 export SPRING_DATASOURCE_PASSWORD="${POSTGRES_PASSWORD}"
-export VIGIL_FLYWAY_LOCATION="filesystem:${ROOT}/db"
+export VIGIL_FLYWAY_LOCATION="${ROOT}/db"
 export VIGIL_ML_SERVICE_URL="http://localhost:8001"
 export MAVEN_HOME="${MAVEN_HOME:-$HOME/.m2/wrapper/dists/apache-maven-3.9.16/56ba1f9f}"
 export PATH="$MAVEN_HOME/bin:$PATH"
 (cd services/decision-api && nohup mvn -o -q spring-boot:run > /tmp/vigil-decision-api.log 2>&1 &)
-for i in $(seq 1 60); do
-  curl -sf http://localhost:8081/actuator/health > /dev/null 2>&1 && break
-  sleep 1
-done
-echo "    decision-api healthy"
+WAIT_TRIES=120 wait_ok decision-api curl -sf http://localhost:8081/actuator/health
 
 echo "==> web"
 (cd web && nohup npm run dev > /tmp/vigil-web.log 2>&1 &)
-for i in $(seq 1 30); do
-  curl -sf http://localhost:5174 > /dev/null 2>&1 && break
-  sleep 1
-done
-echo "    web ready"
+wait_ok web curl -sf http://localhost:5174
 
 echo
 echo "All services up: http://localhost:5174"

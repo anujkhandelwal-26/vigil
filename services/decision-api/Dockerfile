@@ -15,5 +15,5 @@ COPY --from=build /build/target/decision-api.jar app.jar
 COPY db /app/db
 USER vigil
 EXPOSE 8081
-ENV VIGIL_FLYWAY_LOCATION=filesystem:/app/db
+ENV VIGIL_FLYWAY_LOCATION=/app/db
 ENTRYPOINT ["java", "-Xmx512m", "-jar", "app.jar"]

@@ -6,21 +6,26 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+[ -f .env ] || { echo "ERROR: .env not found. Run: cp .env.example .env and fill in real values." >&2; exit 1; }
+set -a; . ./.env; set +a
+PGUSER_="${POSTGRES_USER:-vigil}"
+PGDB_="${POSTGRES_DB:-vigil}"
+
 echo "==> stopping and recreating the db container (fresh volume)"
 docker compose down -v db 2>/dev/null || true
 docker compose up -d db
 
 echo "==> waiting for postgres to be healthy"
-for i in $(seq 1 30); do
+healthy=0
+for i in $(seq 1 60); do
   status=$(docker inspect --format='{{.State.Health.Status}}' vigil-db 2>/dev/null || echo "starting")
-  [ "$status" = "healthy" ] && break
+  [ "$status" = "healthy" ] && { healthy=1; break; }
   sleep 1
 done
+[ "$healthy" = 1 ] || { echo "ERROR: vigil-db did not become healthy within 60s" >&2; exit 1; }
 
-echo "==> applying schema"
-docker exec -i vigil-db psql -U vigil -d vigil -v ON_ERROR_STOP=1 < db/V1__schema.sql
-docker exec -i vigil-db psql -U vigil -d vigil -v ON_ERROR_STOP=1 < db/V2__seed_reason_codes.sql
-docker exec -i vigil-db psql -U vigil -d vigil -v ON_ERROR_STOP=1 < db/V3__seed_policy_chunks.sql
+echo "==> applying migrations (Flyway)"
+./scripts/migrate.sh
 
 echo "==> generating synthetic data (fixed seed 20260921)"
 (cd data/generator && python3 generate.py)
@@ -32,8 +37,10 @@ echo "==> embedding the policy corpus (needs Ollama; retried at ml-service start
 (cd services/ml-service && .venv/bin/python -m app.training.embed_policy) || echo "    skipped: embedding provider unavailable"
 
 echo "==> registering the trained model"
-python3 - <<'PYEOF'
-import json
+REGISTRY_SQL=$(mktemp)
+trap 'rm -f "$REGISTRY_SQL"' EXIT
+python3 - > "$REGISTRY_SQL" <<'PYEOF'
+import json, sys
 m = json.load(open("services/ml-service/artifacts/metrics.json"))
 sql = f"""
 INSERT INTO model_registry (version, algorithm, trained_at, training_rows, feedback_rows_used,
@@ -44,9 +51,8 @@ VALUES ('{m["version"]}', '{m["algorithm"]}', '{m["trained_at"]}', {m["training_
   {m["threshold_low"]}, {m["threshold_high"]}, {m["threshold_decline"]},
   '{json.dumps(m["feature_importance_top15"])}'::jsonb, true, 'seed_demo.sh');
 """
-open("/tmp/_vigil_seed_registry.sql", "w").write(sql)
+sys.stdout.write(sql)
 PYEOF
-docker exec -i vigil-db psql -U vigil -d vigil -v ON_ERROR_STOP=1 < /tmp/_vigil_seed_registry.sql
-rm -f /tmp/_vigil_seed_registry.sql
+docker exec -i vigil-db psql -U "$PGUSER_" -d "$PGDB_" -v ON_ERROR_STOP=1 < "$REGISTRY_SQL"
 
 echo "==> done. Now run ./scripts/run_all.sh to (re)start all three services against this fresh data."

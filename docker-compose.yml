@@ -45,10 +45,13 @@ services:
       EMBED_DIM: ${EMBED_DIM:-768}
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    volumes:
+      # trained/retrained model artifacts persist on the host (gitignored)
+      - ./services/ml-service/artifacts:/app/artifacts
     ports:
       - "${ML_SERVICE_PORT:-8001}:8001"
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/health', timeout=3)"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -76,7 +79,7 @@ services:
     ports:
       - "${SERVER_PORT:-8081}:8081"
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8081/actuator/health"]
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://localhost:8081/actuator/health"]
       interval: 10s
       timeout: 5s
       retries: 10
